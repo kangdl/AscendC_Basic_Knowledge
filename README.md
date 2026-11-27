@@ -7,18 +7,31 @@
 | 路径 | 用途 |
 | --- | --- |
 | `ops_learn_index.md` | 构建时读取的 Markdown 原稿 |
+| `sites/operator-foundations/guides.md` | 章节摘要、导读、图解、速查表、练习和延伸阅读 |
 | `sites/operator-foundations/src/` | 原生 HTML、CSS 和 JavaScript |
-| `sites/operator-foundations/build.mjs` | 通过 Node.js 内置模块解析第二卷、生成正文和搜索数据，并复制静态资源 |
-| `sites/operator-foundations/dist/` | 构建产物，包含 `index.html`、`styles.css`、`app.js`、`guides.js` 和 `content.js` |
+| `sites/operator-foundations/build.mjs` | 读取 Markdown、生成内容 JSON 并复制静态资源 |
+| `sites/operator-foundations/dist/` | 构建产物，包含 `index.html`、`styles.css`、`app.js` 和 `content.json` |
+| [`sites/operator-foundations/examples/content.json`](sites/operator-foundations/examples/content.json) | 一次本地构建的完整 JSON 示例，供查看章节和小节的字段 |
 | `.github/workflows/deploy.yml` | GitHub Actions 构建、校验和发布配置 |
 
 使用与 CI 一致的 Node.js 24，在仓库根目录运行以下命令。项目没有 npm 依赖或安装步骤。
 
 ```sh
 node sites/operator-foundations/build.mjs
+node sites/operator-foundations/preview.mjs
 ```
 
-构建成功后可打开 `sites/operator-foundations/dist/index.html`。修改原稿或站点源码后重新构建即可预览。产物目录已加入 Git 忽略规则。
+浏览器访问 [本地预览](http://127.0.0.1:8765/AscendC_Basic_Knowledge/)。前端通过 HTTP 读取 `content.json`，本地预览需要启动上述服务。修改后重新构建并刷新页面。产物目录已加入 Git 忽略规则。
+
+## 编辑站点内容
+
+1. 正文写在 `ops_learn_index.md` 的「第二卷 算子基础知识」下。保留小节标题开头的编号，已分享的小节链接依赖这些编号。
+2. 章节导读写在 `sites/operator-foundations/guides.md`。沿用现有章节模板，让「原稿章节」对应原稿的二级标题文字。「路由」决定章节链接，「小节导读」按原稿中的小节编号关联。图解和速查表用两列 Markdown 表格，练习的题目和答案用空行分开，延伸阅读用 HTTP 或 HTTPS Markdown 链接。
+3. 运行构建。脚本将正文、导读和搜索数据写入 `dist/content.json`，前端按当前路由渲染。内容修改提交 Markdown 源文件即可，JSON 由本地构建或 GitHub Actions 生成。
+
+示例 JSON 保留生成时的内容快照，便于查看 `guides`（章节导读）和 `book`（正文与小节）的字段。GitHub Actions 每次从 Markdown 重新构建，并只上传 `dist/`，示例可以随文档需要单独更新。
+
+正文段落、表格和代码可以在现有结构内编辑。构建脚本会校验第二卷标题、章节数量和小节编号，也会校验导读文件的必填栏目、表格列数及引用的小节编号。重命名原稿章节标题时，同步更新导读里的「原稿章节」。如果要调整章节层级或新增导读栏目，同步更新构建脚本。正文渲染器支持常用 Markdown 写法，新增语法时请在本地预览确认渲染效果。
 
 ## 首次部署
 
@@ -41,7 +54,7 @@ node sites/operator-foundations/build.mjs
 - **找不到工作流或无法手动运行**：确认工作流已进入默认分支 `main`，Actions 已启用，当前账号有运行权限。
 - **构建失败**：在 **Actions** 展开 **Build site**。检查原稿是否仍有「第二卷 算子基础知识」标题，以及脚本预期的 7 章和数学附录。若 **Verify public files** 失败，检查生成文件是否符合公开文件清单。
 - **发布失败**：确认 **Settings → Pages → Source** 为 **GitHub Actions**。如果 `github-pages` 环境已有分支限制或审批规则，确认它允许本次部署的分支并完成所需审批。
-- **首页 404 或白屏**：先打开部署详情给出的 URL，确认仓库子路径和末尾斜杠，例如 `/AscendC_Basic_Knowledge/`。在浏览器开发者工具的 Network 中检查相对路径资源是否返回 200，尤其是 `content.js`。同时检查 Console 中的 JavaScript 错误。
+- **首页 404 或内容加载失败**：先打开部署详情给出的 URL，确认仓库子路径和末尾斜杠，例如 `/AscendC_Basic_Knowledge/`。在浏览器开发者工具的 Network 中检查 `app.js` 和 `content.json` 是否返回 200，同时检查 Console 中的错误。
 - **章节链接 404**：使用带 `#` 的章节链接，例如 [Transformer 章节](https://kangdl.github.io/AscendC_Basic_Knowledge/#transformer/guide)。章节和小节由浏览器读取 URL 片段路由，GitHub Pages 始终只需提供同一个 `index.html`。
 
 ## 版本回滚

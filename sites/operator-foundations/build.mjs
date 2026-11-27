@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const path = (relative) => fileURLToPath(new URL(relative, import.meta.url));
@@ -17,7 +17,7 @@ for (const line of source.slice(volume.index).split(/\r?\n/).slice(1)) {
   const heading = !fenced && line.match(/^(#{1,5})\s+(.+)$/);
   if (heading?.[1] === '#') break;
   if (heading?.[1] === '##') {
-    current = { title: heading[2], sections: [], lines: [] };
+    current = { title: heading[2].trim(), sections: [], lines: [] };
     pages.push(current);
     section = undefined;
     ancestors = [];
@@ -59,10 +59,15 @@ function inline(line) {
   }).join('');
 }
 
+function tableCells(line) {
+  return line.trim().slice(1, -1).split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replaceAll('\\|', '|'));
+}
+
 function table(rows) {
-  const cells = (line, tag) => '<tr>' + line.trim().slice(1, -1)
-    .split(/(?<!\\)\|/).map((cell) => '<' + tag + (tag === 'th' ? ' scope="col"' : '') +
-      '>' + inline(cell.trim().replaceAll('\\|', '|')) + '</' + tag + '>').join('') + '</tr>';
+  const cells = (line, tag) => '<tr>' + tableCells(line)
+    .map((cell) => '<' + tag + (tag === 'th' ? ' scope="col"' : '') +
+      '>' + inline(cell) + '</' + tag + '>').join('') + '</tr>';
   return '<div class="table-scroll" tabindex="0"><table><thead>' + cells(rows[0], 'th') +
     '</thead><tbody>' + rows.slice(2).map((row) => cells(row, 'td')).join('') + '</tbody></table></div>';
 }
@@ -128,8 +133,88 @@ function render(lines) {
   return output.join('\n');
 }
 
-await mkdir(path('./dist'), { recursive: true });
-await Promise.all(['index.html', 'app.js', 'guides.js', 'styles.css'].map((file) => copyFile(path('./src/' + file), path('./dist/' + file))));
+function readGuides(markdown) {
+  const byChapter = new Map();
+  const routeIds = new Set();
+  const chapters = markdown.trim().replace(/\r\n/g, '\n').split(/^## /m).slice(1);
+  for (const chapter of chapters) {
+    const [metadata, ...blocks] = chapter.trim().split(/^### /m);
+    const [title, ...fields] = metadata.trim().split('\n');
+    const fail = (message) => { throw new Error('guides.md / ' + title + '：' + message); };
+    const meta = new Map();
+    for (const line of fields.filter((line) => line.trim())) {
+      const match = line.match(/^- (路由|原稿章节|图标|编号)：(.+)$/);
+      if (!match || meta.has(match[1])) fail('无效或重复的章节属性 ' + line);
+      meta.set(match[1], match[2].trim());
+    }
+    const id = meta.get('路由');
+    const icon = meta.get('图标');
+    const number = meta.get('编号');
+    const sourceTitle = meta.get('原稿章节');
+    const sourcePage = pages.find((page) => page.title === sourceTitle);
+    if (!/^[a-z][a-z0-9-]*$/.test(id ?? '') || routeIds.has(id) ||
+        !/^[a-z][a-z0-9-]*$/.test(icon ?? '') || (number !== undefined && !/^\d+$/.test(number)) ||
+        !sourcePage || byChapter.has(sourceTitle)) fail('章节属性无效、重复或无法匹配原稿');
+
+    const guide = { id, icon, number, title: title.trim() };
+    const seen = new Set();
+    for (const block of blocks) {
+      const [heading, ...lines] = block.trim().split('\n');
+      const [name, diagramTitle] = heading.split(/：(.*)/s, 2);
+      const body = lines.join('\n').trim();
+      if (!body || seen.has(name)) fail('栏目为空或重复 ' + name);
+      seen.add(name);
+      if (name === '摘要' || name === '导读') {
+        guide[name === '摘要' ? 'summary' : 'intro'] = body.replace(/\n/g, ' ');
+      } else if (name === '图解' || name === '速查表') {
+        const rows = body.split('\n').map((line) => {
+          if (!line.trim().startsWith('|') || !line.trim().endsWith('|')) fail('表格行需要以竖线开头和结尾');
+          const cells = tableCells(line);
+          if (cells.length !== 2 || cells.some((cell) => !cell)) fail('表格需要两列');
+          return cells;
+        });
+        const [header, separator, ...entries] = rows;
+        if (!entries.length || !separator.every((cell) => /^:?-{3,}:?$/.test(cell))) fail('表格缺少分隔行或数据');
+        if (name === '速查表') guide.table = [...header, entries];
+        else if (diagramTitle?.trim()) guide.diagram = [diagramTitle.trim(), entries];
+        else fail('图解需要标题');
+      } else if (name === '练习') {
+        guide.exercise = body.split(/\n\s*\n/).map((part) => part.replace(/\n/g, ' '));
+        if (guide.exercise.length !== 2) fail('练习需要题目和答案两个段落');
+      } else if (name === '小节导读') {
+        const topics = new Map();
+        for (const line of body.split('\n')) {
+          const match = line.match(/^- (\d+(?:\.\d+)+)\s+(.+)$/);
+          const sectionId = 's-' + match?.[1];
+          if (!match || topics.has(sectionId) ||
+              !sourcePage.sections.some((section) => section.id === sectionId && section.level === 3)) {
+            fail('无效或重复的小节编号 ' + line);
+          }
+          topics.set(sectionId, match[2]);
+        }
+        guide.topics = Object.fromEntries(topics);
+      } else if (name === '延伸阅读') {
+        guide.links = body.split('\n').map((line) => {
+          const match = line.match(/^- \[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+          if (!match) fail('延伸阅读需要 HTTP 或 HTTPS Markdown 链接');
+          return match.slice(1);
+        });
+      } else {
+        fail('未知栏目 ' + name);
+      }
+    }
+    if (!guide.summary || !guide.intro || !guide.table || !guide.exercise) fail('缺少摘要、导读、速查表或练习');
+    routeIds.add(id);
+    byChapter.set(sourceTitle, guide);
+  }
+  return pages.map(({ title }) => {
+    const guide = byChapter.get(title);
+    if (!guide) throw new Error('guides.md 缺少原稿章节「' + title + '」的导读');
+    return guide;
+  });
+}
+
+const guides = readGuides(await readFile(path('./guides.md'), 'utf8'));
 const book = pages.map(({ title, sections, lines }) => {
   const chapters = sections.map(({ lines: body, ...entry }) => ({
     ...entry,
@@ -150,5 +235,10 @@ const book = pages.map(({ title, sections, lines }) => {
     html: render(lines),
   };
 });
-await writeFile(path('./dist/content.js'), 'window.operatorBook = ' + JSON.stringify(book) + ';\n');
-console.log('已生成 ' + pages.length + ' 个章节入口和 ' + headings.length + ' 个小节。可打开 dist/index.html。');
+await mkdir(path('./dist'), { recursive: true });
+await Promise.all([
+  ...['index.html', 'app.js', 'styles.css'].map((file) => copyFile(path('./src/' + file), path('./dist/' + file))),
+  ...['content.js', 'guides.js'].map((file) => rm(path('./dist/' + file), { force: true })),
+  writeFile(path('./dist/content.json'), JSON.stringify({ guides, book }) + '\n'),
+]);
+console.log('已生成 dist/content.json，含 ' + pages.length + ' 个章节入口和 ' + headings.length + ' 个小节。');

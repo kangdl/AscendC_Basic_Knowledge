@@ -1,6 +1,5 @@
-const book = window.operatorBook;
-const guides = window.operatorGuides;
 const main = document.querySelector('main');
+const { book, guides } = await loadContent();
 const chapterNav = document.querySelector('#chapter-nav');
 const sidebar = document.querySelector('#sidebar');
 const navToggle = document.querySelector('.nav-toggle');
@@ -12,6 +11,17 @@ const mobileNav = matchMedia('(max-width: 850px)');
 let route;
 let searchOpener;
 const expandedBranches = new Set();
+
+async function loadContent() {
+  try {
+    const response = await fetch(new URL('./content.json', import.meta.url));
+    if (!response.ok) throw new Error('content.json HTTP ' + response.status);
+    return await response.json();
+  } catch (error) {
+    main.innerHTML = '<div class="home"><p role="alert">内容加载失败，请刷新页面重试。</p></div>';
+    throw error;
+  }
+}
 
 const contents = book.map((entry) => {
   const byId = new Map(entry.sections.map((section) => [section.id, section]));
@@ -80,7 +90,7 @@ function sidebarChapter(guide, index) {
   return '<a class="side-link' + (active ? ' chapter-active' : '') + '" href="#' + guide.id + '"' +
     (active && !route.page ? ' aria-current="page"' : '') + '>' +
     (guide.number ? '<span class="side-number">' + guide.number + '</span>' : icon('math')) +
-    '<span>' + guide.title + '</span></a>' + (active ? sidebarTree(index) : '');
+    '<span>' + escape(guide.title) + '</span></a>' + (active ? sidebarTree(index) : '');
 }
 
 function showSidebar() {
@@ -140,7 +150,7 @@ function showRoadmap() {
     ['学习算子实现', guides.slice(2, 4)],
     ['理解硬件与优化', guides.slice(4, -1)],
   ];
-  const links = (chapters) => chapters.map((guide) => '<a href="#' + guide.id + '">' + guide.title + '</a>').join('');
+  const links = (chapters) => chapters.map((guide) => '<a href="#' + guide.id + '">' + escape(guide.title) + '</a>').join('');
   return '<section class="roadmap" aria-labelledby="roadmap-title"><h2 id="roadmap-title">学习路线</h2><ol>' +
     stages.map(([label, chapters]) => '<li><strong>' + label + '</strong><div>' + links(chapters) + '</div></li>').join('') +
     '</ol><div class="roadmap-reference"><span>遇到数学概念时</span>' + links(guides.slice(-1)) + '</div></section>';
@@ -149,7 +159,7 @@ function showRoadmap() {
 function showHome() {
   const cards = guides.map((guide) => '<a class="chapter-card" href="#' + guide.id + '">' +
     '<div class="card-top">' + icon(guide.icon) + '<span>' + chapterNumber(guide) + '</span></div>' +
-    '<h3>' + guide.title + '</h3><p>' + guide.summary + '</p></a>').join('');
+    '<h3>' + escape(guide.title) + '</h3><p>' + escape(guide.summary) + '</p></a>').join('');
   main.innerHTML = '<div class="home"><section class="hero" aria-labelledby="home-title">' +
     '<div class="hero-copy"><h1 id="home-title">算子基础知识</h1>' +
     '<p>面向算子开发新人的入门知识库。从理解模型计算，到编写算子、分析硬件与优化性能。</p>' +
@@ -162,14 +172,14 @@ function showHome() {
 
 function showFlow(diagram) {
   const [title, steps] = diagram;
-  return '<figure class="flow"><figcaption>' + title + '</figcaption><ol>' + steps.map(([name, description]) =>
-    '<li><strong>' + name + '</strong><span>' + description + '</span></li>').join('') + '</ol></figure>';
+  return '<figure class="flow"><figcaption>' + escape(title) + '</figcaption><ol>' + steps.map(([name, description]) =>
+    '<li><strong>' + escape(name) + '</strong><span>' + escape(description) + '</span></li>').join('') + '</ol></figure>';
 }
 
 function showTable(guide) {
   const [heading, label, rows] = guide.table;
-  return '<div class="table-scroll" tabindex="0"><table><thead><tr><th scope="col">' + heading + '</th><th scope="col">' + label +
-    '</th></tr></thead><tbody>' + rows.map(([name, detail]) => '<tr><th scope="row">' + name + '</th><td>' + detail + '</td></tr>').join('') +
+  return '<div class="table-scroll" tabindex="0"><table><thead><tr><th scope="col">' + escape(heading) + '</th><th scope="col">' + escape(label) +
+    '</th></tr></thead><tbody>' + rows.map(([name, detail]) => '<tr><th scope="row">' + escape(name) + '</th><td>' + escape(detail) + '</td></tr>').join('') +
     '</tbody></table></div>';
 }
 
@@ -211,14 +221,14 @@ function showChapter(index) {
   const prev = guides[index - 1];
   const next = guides[index + 1];
   articleLayout(breadcrumb([['#curriculum', '章节导览']], chapterNumber(guide)) +
-    '<header class="article-heading"><h1>' + guide.title + '</h1><p>' + guide.intro + '</p><span class="source-note">' + note + '</span></header>' +
+    '<header class="article-heading"><h1>' + escape(guide.title) + '</h1><p>' + escape(guide.intro) + '</p><span class="source-note">' + note + '</span></header>' +
     (topics.length ? '<section id="full-chapter"><h2>本章小节</h2>' + topicList(index, topics) + '</section>' : '') +
     '<section id="guide"><h2>入门图解</h2>' + (guide.diagram ? showFlow(guide.diagram) : attentionDemo()) + showTable(guide) + '</section>' +
     (entry.html ? '<section class="prose">' + entry.html + '</section>' : '') +
-    '<section id="exercise"><h2>动手想一想</h2><details class="exercise"><summary>' + guide.exercise[0] +
-    '</summary><p>' + guide.exercise[1] + '</p></details></section>' +
+    '<section id="exercise"><h2>动手想一想</h2><details class="exercise"><summary>' + escape(guide.exercise[0]) +
+    '</summary><p>' + escape(guide.exercise[1]) + '</p></details></section>' +
     (guide.links ? '<section id="reading"><h2>延伸阅读</h2><ul class="reading">' + guide.links.map(([label, url]) =>
-      '<li><a href="' + url + '">' + label + '</a></li>').join('') + '</ul></section>' : '') +
+      '<li><a href="' + escape(url) + '">' + escape(label) + '</a></li>').join('') + '</ul></section>' : '') +
     '<nav class="pagination" aria-label="相邻章节">' +
       neighbor(prev && chapterHref(prev.id), prev?.title, '上一章') + neighbor(next && chapterHref(next.id), next?.title, '下一章') +
     '</nav>',
@@ -230,7 +240,6 @@ function showChapter(index) {
 function showTopic(index, page) {
   const guide = guides[index];
   const { children } = contents[index];
-  const topics = children.get(null);
   const siblings = children.get(page.parentId);
   const position = siblings.indexOf(page);
   const prev = siblings[position - 1];
@@ -249,7 +258,7 @@ function showTopic(index, page) {
     }).join('');
   }
 
-  const lead = guide.topics?.[topics.indexOf(page)];
+  const lead = guide.topics?.[page.id];
   const subsections = renderSubsections(subsectionList, 2);
   const allOutline = anchors.length && anchors.every((section) => !section.html);
   const status = allOutline ? '<p class="section-status">以下小节为原稿提纲。</p>' : '';
@@ -292,12 +301,11 @@ function renderRoute(initial = false) {
 
 const searchIndex = guides.flatMap((guide, index) => {
   const entry = book[index];
-  const topics = entry.sections.filter((section) => section.level === 3);
   return [
     { label: guide.title, href: '#' + guide.id, hint: guide.summary, text: guide.intro + ' ' + JSON.stringify(guide.table) },
     ...entry.sections.map((section) => ({
       label: section.title, href: chapterHref(guide.id, section.id), hint: guide.title,
-      text: [section.searchText, guide.topics?.[topics.indexOf(section)]].filter(Boolean).join(' '),
+      text: [section.searchText, guide.topics?.[section.id]].filter(Boolean).join(' '),
     })),
   ];
 });

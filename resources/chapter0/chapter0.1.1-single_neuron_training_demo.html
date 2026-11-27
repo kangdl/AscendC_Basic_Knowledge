@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第一章附件 · 单神经元一步训练实验台</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8; --surface-muted: #EFEFF2; --text: #171717; --text-muted: #52525B;
+  --border: rgba(23,23,23,0.12);
+  --brand: #0FDC78; --brand-soft: #E5FFF2; --brand-text: #004D26; --brand-on: #004D26;
+  --radius: 8px; --radius-card: 12px; --radius-full: 999px;
+  --spacer-4: 4px; --spacer-8: 8px; --spacer-12: 12px; --spacer-16: 16px; --spacer-20: 20px; --spacer-24: 24px;
+  --font-sans: "SF Pro Text","PingFang SC",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono: "JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --weight-regular: 400; --weight-medium: 500; --weight-strong: 600;
+  --text-caption: 12px/18px; --text-body: 14px/20px; --text-title: 16px/24px; --text-code: 13px/20px;
+}
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
+  --border: rgba(229,229,229,0.12);
+  --brand: #32F08C; --brand-soft: #004D26; --brand-text: #E5FFF2;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme]) {
+    color-scheme: dark;
+    --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
+    --border: rgba(229,229,229,0.12);
+    --brand: #32F08C; --brand-soft: #004D26; --brand-text: #E5FFF2;
+  }
+}
+body { margin: 0; padding: var(--spacer-24); background: var(--surface-muted); color: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); display: flex; justify-content: center; }
+.page { width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: var(--spacer-12); }
+.page-head { font: var(--weight-medium) var(--text-title) var(--font-sans); }
+.page-sub { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.trainer-widget { color: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); width: 100%; }
+.trainer-widget .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--spacer-20); display: flex; flex-direction: column; gap: var(--spacer-16); }
+.trainer-widget .head { display: flex; align-items: center; justify-content: space-between; gap: var(--spacer-12); flex-wrap: wrap; }
+.trainer-widget .title { font: var(--weight-medium) var(--text-title) var(--font-sans); }
+.trainer-widget .badge { font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--brand-text); background: var(--brand-soft); border-radius: var(--radius-full); padding: var(--spacer-4) var(--spacer-12); }
+.trainer-widget .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--spacer-12); }
+.trainer-widget .ctrl { display: flex; flex-direction: column; gap: var(--spacer-4); }
+.trainer-widget .ctrl label { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.trainer-widget .ctrl input { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-12); width: 100%; box-sizing: border-box; }
+.trainer-widget .params { display: flex; gap: var(--spacer-12); flex-wrap: wrap; align-items: center; }
+.trainer-widget .params .plabel { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.trainer-widget .chip { font: var(--weight-medium) var(--text-code) var(--font-mono); background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-4) var(--spacer-12); }
+.trainer-widget .stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--spacer-16); }
+.trainer-widget .stage { background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-12); display: flex; flex-direction: column; gap: var(--spacer-8); }
+.trainer-widget .stage.focus { border-color: var(--brand); }
+.trainer-widget .stage h3 { margin: 0; font: var(--weight-medium) var(--text-body) var(--font-sans); }
+.trainer-widget .row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--spacer-8); }
+.trainer-widget .row .f { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.trainer-widget .row .v { font: var(--weight-medium) var(--text-code) var(--font-mono); white-space: nowrap; }
+.trainer-widget .row .v.big { font: var(--weight-strong) var(--text-title) var(--font-mono); color: var(--brand-text); }
+.trainer-widget .actions { display: flex; gap: var(--spacer-12); align-items: center; flex-wrap: wrap; }
+.trainer-widget button { font: var(--weight-medium) var(--text-body) var(--font-sans); border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-16); cursor: pointer; border: 1px solid var(--border); }
+.trainer-widget button.primary { background: var(--brand); color: var(--brand-on); border-color: var(--brand); }
+.trainer-widget button.ghost { background: var(--surface-muted); color: var(--text); }
+.trainer-widget .rule { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.trainer-widget .log { display: flex; flex-direction: column; gap: var(--spacer-4); border-top: 1px solid var(--border); padding-top: var(--spacer-12); }
+.trainer-widget .log .line { font: var(--weight-regular) var(--text-code) var(--font-mono); color: var(--text-muted); }
+.trainer-widget .log .line:first-child { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-head">单神经元 · 一步训练实验台</div>
+  <div class="page-sub">配套阅读：ops_learn_index.md §0.1.1.6 ｜ 自包含页面，可离线使用</div>
+  <div class="trainer-widget" data-dynamic-ui-widget data-template="explanation-panel">
+    <div class="card">
+      <div class="head">
+        <span class="title">前向 → 损失 → 反向 → 更新</span>
+        <span class="badge" data-f="stepbadge">已训练 0 步</span>
+      </div>
+      <div class="controls">
+        <div class="ctrl"><label>输入 x₁</label><input type="number" step="0.5" value="1" data-in="x1"></div>
+        <div class="ctrl"><label>输入 x₂</label><input type="number" step="0.5" value="2" data-in="x2"></div>
+        <div class="ctrl"><label>目标 y</label><input type="number" step="0.1" value="1" data-in="y"></div>
+        <div class="ctrl"><label>学习率 η</label><input type="number" step="0.1" value="0.5" data-in="eta"></div>
+      </div>
+      <div class="params">
+        <span class="plabel">可学习参数（会被更新）</span>
+        <span class="chip">w₁ = <span data-f="w1">0.5</span></span>
+        <span class="chip">w₂ = <span data-f="w2">-0.3</span></span>
+        <span class="chip">b = <span data-f="b">0.1</span></span>
+      </div>
+      <div class="stages">
+        <div class="stage">
+          <h3>① 前向</h3>
+          <div class="row"><span class="f">z = w₁x₁ + w₂x₂ + b</span><span class="v" data-f="z">0</span></div>
+          <div class="row"><span class="f">a = σ(z)</span><span class="v" data-f="a">0.5</span></div>
+        </div>
+        <div class="stage focus">
+          <h3>② 损失</h3>
+          <div class="row"><span class="f">误差 a − y</span><span class="v" data-f="err">-0.5</span></div>
+          <div class="row"><span class="f">L = ½(a − y)²</span><span class="v big" data-f="L">0.125</span></div>
+        </div>
+        <div class="stage">
+          <h3>③ 反向</h3>
+          <div class="row"><span class="f">δ = (a−y)·a(1−a)</span><span class="v" data-f="delta">-0.125</span></div>
+          <div class="row"><span class="f">∂L/∂w₁ = δ·x₁</span><span class="v" data-f="gw1">-0.125</span></div>
+          <div class="row"><span class="f">∂L/∂w₂ = δ·x₂</span><span class="v" data-f="gw2">-0.25</span></div>
+          <div class="row"><span class="f">∂L/∂b = δ</span><span class="v" data-f="gb">-0.125</span></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" data-act="update">梯度下降更新一步</button>
+        <button class="ghost" data-act="reset">重置</button>
+        <span class="rule">更新规则：w ← w − η·∂L/∂w ， b ← b − η·∂L/∂b</span>
+      </div>
+      <div class="log" data-f="log">
+        <div class="line">初始状态：L = 0.125，等待第一次更新…</div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var root = document.querySelector('.trainer-widget');
+  if (!root || root.dataset.mounted === 'true') return;
+  root.dataset.mounted = 'true';
+  var DEF = { x1: 1, x2: 2, y: 1, eta: 0.5, w1: 0.5, w2: -0.3, b: 0.1 };
+  var state = { w1: DEF.w1, w2: DEF.w2, b: DEF.b, step: 0 };
+  function q(k) { return root.querySelector('[data-f="' + k + '"]'); }
+  function inp(k) { return root.querySelector('[data-in="' + k + '"]'); }
+  function num(k, d) { var v = parseFloat(inp(k).value); return isNaN(v) ? d : v; }
+  function fmt(v) { var r = Math.round(v * 1e4) / 1e4; if (Object.is(r, -0)) r = 0; return r.toFixed(4).replace(/\.?0+$/, ''); }
+  function sig(z) { return 1 / (1 + Math.exp(-z)); }
+  function compute() {
+    var x1 = num('x1', DEF.x1), x2 = num('x2', DEF.x2), y = num('y', DEF.y);
+    var z = state.w1 * x1 + state.w2 * x2 + state.b;
+    var a = sig(z);
+    var err = a - y;
+    var L = 0.5 * err * err;
+    var delta = err * a * (1 - a);
+    return { x1: x1, x2: x2, y: y, z: z, a: a, err: err, L: L, delta: delta, gw1: delta * x1, gw2: delta * x2, gb: delta };
+  }
+  function render() {
+    var c = compute();
+    q('w1').textContent = fmt(state.w1); q('w2').textContent = fmt(state.w2); q('b').textContent = fmt(state.b);
+    q('z').textContent = fmt(c.z); q('a').textContent = fmt(c.a);
+    q('err').textContent = fmt(c.err); q('L').textContent = fmt(c.L);
+    q('delta').textContent = fmt(c.delta); q('gw1').textContent = fmt(c.gw1);
+    q('gw2').textContent = fmt(c.gw2); q('gb').textContent = fmt(c.gb);
+    q('stepbadge').textContent = '已训练 ' + state.step + ' 步';
+    return c;
+  }
+  function addLog(text) {
+    var log = q('log');
+    var line = document.createElement('div');
+    line.className = 'line';
+    line.textContent = text;
+    log.insertBefore(line, log.firstChild);
+    while (log.children.length > 6) log.removeChild(log.lastChild);
+  }
+  root.addEventListener('input', function (e) {
+    if (e.target.matches('[data-in]')) render();
+  });
+  root.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'reset') {
+      state = { w1: DEF.w1, w2: DEF.w2, b: DEF.b, step: 0 };
+      ['x1', 'x2', 'y', 'eta'].forEach(function (k) { inp(k).value = DEF[k]; });
+      q('log').innerHTML = '<div class="line">初始状态：L = 0.125，等待第一次更新…</div>';
+      render();
+      return;
+    }
+    var eta = Math.min(Math.max(num('eta', DEF.eta), 0.01), 2);
+    var c = compute();
+    var ow1 = state.w1, ow2 = state.w2, ob = state.b;
+    state.w1 -= eta * c.gw1; state.w2 -= eta * c.gw2; state.b -= eta * c.gb;
+    state.step += 1;
+    var n = render();
+    addLog('第' + state.step + '步：w₁ ' + fmt(ow1) + '→' + fmt(state.w1) + '，w₂ ' + fmt(ow2) + '→' + fmt(state.w2) + '，b ' + fmt(ob) + '→' + fmt(state.b) + '；L ' + fmt(c.L) + '→' + fmt(n.L));
+  });
+  render();
+})();
+</script>
+</body>
+</html>

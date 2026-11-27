@@ -1,0 +1,63 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, pages-deploy]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/pages-deploy'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: sites/operator-foundations
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build site
+        run: node build.mjs
+      - name: Verify public files
+        shell: bash
+        run: |
+          diff -u <(printf '%s\n' app.js content.js guides.js index.html styles.css) \
+            <(find dist -mindepth 1 -printf '%P\n' | LC_ALL=C sort)
+          for file in app.js content.js guides.js index.html styles.css; do
+            test -f "dist/$file" && test -s "dist/$file" && test ! -L "dist/$file" || exit 1
+          done
+          for file in app.js content.js guides.js; do
+            node --check "dist/$file"
+          done
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: sites/operator-foundations/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -22,5 +22,5 @@ export function resourceType(path) {
 
 export function publicFileType(path) {
   return siteFiles.get(path) ?? resourceType(path) ??
-    (/^diagrams\/[a-f0-9]{24}(?:-narrow)?\.svg$/.test(path) ? 'image/svg+xml' : undefined);
+    (/^diagrams\/[a-f0-9]{24}(?:-narrow)?\.(?:svg|png)$/.test(path) ? imageTypes.get(path.split('.').at(-1)) : undefined);
 }

@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import katex from 'katex';
 import { resourceType } from './resource-path.mjs';
-import { narrowSource, renderDiagrams } from './render-diagrams.mjs';
+import { diagramExtension, narrowSource, renderDiagrams } from './render-diagrams.mjs';
 import { verifyBuild } from './verify-build.mjs';
 
 const path = (relative) => fileURLToPath(new URL(relative, import.meta.url));
@@ -166,9 +166,13 @@ function render(lines) {
         const source = code.join('\n');
         const id = createHash('sha256').update(stylesheet).update(source).digest('hex').slice(0, 24);
         diagrams.set(id, { source, caption });
-        const narrow = narrowSource(source) !== source ? '<source media="(max-width: 600px)" srcset="diagrams/' + id + '-narrow.svg">' : '';
+        const extension = diagramExtension(source);
+        const url = 'diagrams/' + id + '.' + extension;
+        const density = extension === 'png' ? ' 2x' : '';
+        const narrow = narrowSource(source) !== source ? '<source media="(max-width: 600px)" srcset="diagrams/' + id + '-narrow.' + extension + density + '">' : '';
         output.push('<figure class="mermaid-figure"><picture class="mermaid-diagram">' + narrow +
-          '<img src="diagrams/' + id + '.svg" alt="' + escape(caption ?? 'Mermaid 图') + '"></picture>' +
+          '<img src="' + url + '"' + (density ? ' srcset="' + url + density + '"' : '') +
+          ' alt="' + escape(caption ?? 'Mermaid 图') + '"></picture>' +
           (caption ? '<figcaption>' + inline(caption) + '</figcaption>' : '') + '</figure>');
       } else {
         output.push('<div class="code-block"><div class="code-toolbar"><span>' + escape(language || '示例') + '</span><button type="button" class="text-button" data-copy>复制</button></div><pre tabindex="0"><code>' + escape(code.join('\n')) + '</code></pre></div>');

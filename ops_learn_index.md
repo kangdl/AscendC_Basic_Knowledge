@@ -347,11 +347,9 @@ $$
 其中 $W^{(l)} \in \mathbb{R}^{n_l \times n_{l-1}}$，**第 $i$ 行恰好是第 $i$ 个神经元的权重**；$\sigma$ 对向量逐元素作用。把第一层展开写，就能看清"矩阵 = 一排神经元"：
 
 $$
-\begin{bmatrix} z^{(1)}_1 \cr z^{(1)}_2 \end{bmatrix}
-=
+\begin{bmatrix} z^{(1)}_1 \cr z^{(1)}_2 \end{bmatrix} =
 \begin{bmatrix} w^{(1)}_{11} & w^{(1)}_{12} \cr w^{(1)}_{21} & w^{(1)}_{22} \end{bmatrix}
-\begin{bmatrix} x_1 \cr x_2 \end{bmatrix}
-+
+\begin{bmatrix} x_1 \cr x_2 \end{bmatrix} +
 \begin{bmatrix} b^{(1)}_1 \cr b^{(1)}_2 \end{bmatrix}
 $$
 

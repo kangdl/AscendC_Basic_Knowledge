@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第一章附件 · Sigmoid 激活函数曲线</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8; --surface-muted: #EFEFF2; --text: #171717; --text-muted: #52525B;
+  --border: rgba(23,23,23,0.12);
+  --brand: #0FDC78; --brand-text: #004D26; --chart-series-1: #02743B;
+  --radius-card: 12px;
+  --spacer-12: 12px; --spacer-20: 20px; --spacer-24: 24px;
+  --font-sans: "SF Pro Text","PingFang SC",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --weight-regular: 400; --weight-medium: 500;
+  --text-caption: 12px/18px; --text-body: 14px/20px; --text-title: 16px/24px;
+}
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
+  --border: rgba(229,229,229,0.12);
+  --brand: #32F08C; --brand-text: #E5FFF2; --chart-series-1: #32F08C;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme]) {
+    color-scheme: dark;
+    --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
+    --border: rgba(229,229,229,0.12);
+    --brand: #32F08C; --brand-text: #E5FFF2; --chart-series-1: #32F08C;
+  }
+}
+body { margin: 0; padding: var(--spacer-24); background: var(--surface-muted); color: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); display: flex; justify-content: center; }
+.page { width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: var(--spacer-12); }
+.page-head { font: var(--weight-medium) var(--text-title) var(--font-sans); }
+.page-sub { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--spacer-20); }
+.t { fill: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); }
+.ts { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.axis { stroke: var(--border); stroke-width: 1.5; fill: none; }
+.leader { stroke: var(--text-muted); stroke-width: .5; stroke-dasharray: 4 4; fill: none; opacity: .7; }
+.curve { stroke: var(--chart-series-1); stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.cap { fill: var(--surface); stroke: var(--border); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-head">Sigmoid 激活函数曲线</div>
+  <div class="page-sub">配套阅读：ops_learn_index.md §0.1.1.3.2 ｜ 绿点为数值实例的工作点 z=0 → a=0.5</div>
+  <div class="card">
+    <svg viewBox="0 0 720 272" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sigmoid 激活函数曲线">
+      <path class="leader" d="M80 130 L680 130"/>
+      <path class="leader" d="M380 50 L380 210"/>
+      <path class="axis" d="M80 50 L80 210 L680 210"/>
+      <text class="ts" x="70" y="54" text-anchor="end">1</text>
+      <text class="ts" x="70" y="134" text-anchor="end">0.5</text>
+      <text class="ts" x="70" y="214" text-anchor="end">0</text>
+      <text class="ts" x="80" y="228" text-anchor="middle">−6</text>
+      <text class="ts" x="180" y="228" text-anchor="middle">−4</text>
+      <text class="ts" x="280" y="228" text-anchor="middle">−2</text>
+      <text class="ts" x="380" y="228" text-anchor="middle">0</text>
+      <text class="ts" x="480" y="228" text-anchor="middle">2</text>
+      <text class="ts" x="580" y="228" text-anchor="middle">4</text>
+      <text class="ts" x="680" y="228" text-anchor="middle">6</text>
+      <text class="t" x="380" y="254" text-anchor="middle">z（加权输入）</text>
+      <text class="ts" x="84" y="44">a = σ(z)</text>
+      <polyline class="curve" points="80,209.6 130,208.9 180,207.1 230,202.4 280,190.9 330,167 355,149.6 380,130 405,110.4 430,93 480,69.1 530,57.6 580,52.9 630,51.1 680,50.4"/>
+      <circle cx="380" cy="130" r="5" fill="var(--brand)" stroke="var(--brand-text)" stroke-width="1"/>
+      <rect class="cap" x="420" y="146" width="184" height="24" rx="8"/>
+      <text class="t" x="432" y="163">工作点：z=0 → a=0.5</text>
+    </svg>
+  </div>
+</div>
+</body>
+</html>

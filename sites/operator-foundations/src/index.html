@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="面向算子开发新人的学习知识库。学习大模型、Transformer、Triton、AscendC、硬件架构、量化与 Tiling。">
+  <meta name="theme-color" content="#faf8f3">
+  <link rel="icon" href="data:,">
+  <title>算子研习册 · 算子基础知识</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <header class="topbar">
+    <button class="icon-button nav-toggle" type="button" aria-label="打开章节目录" aria-expanded="false" aria-controls="sidebar"><i class="icon icon-menu" aria-hidden="true"></i></button>
+    <a class="brand" href="#overview" aria-label="算子研习册首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>算子研习册</a>
+    <nav class="top-nav" aria-label="快捷导航">
+      <a href="#overview" data-top="overview">概览</a>
+      <a href="#curriculum" data-top="curriculum">章节导览</a>
+      <a href="#math" data-top="math">数学附录</a>
+    </nav>
+    <button class="search-trigger" type="button" data-search aria-label="搜索知识库"><i class="icon icon-search" aria-hidden="true"></i><span>搜索知识库</span><kbd>Ctrl K</kbd></button>
+  </header>
+  <button class="nav-scrim" type="button" tabindex="-1" aria-label="关闭章节目录" hidden></button>
+  <aside id="sidebar" class="sidebar">
+    <nav id="chapter-nav" aria-label="章节目录"></nav>
+  </aside>
+  <main id="main" tabindex="-1"></main>
+  <dialog id="search-dialog" aria-labelledby="search-title">
+    <div class="dialog-heading"><h2 id="search-title">搜索知识库</h2><button type="button" class="text-button" id="close-search">关闭 <kbd>Esc</kbd></button></div>
+    <label class="search-field"><i class="icon icon-search" aria-hidden="true"></i><input type="search" placeholder="试试 Attention、Softmax 或 Tiling" aria-label="搜索章节与正文"></label>
+    <div id="search-results" aria-live="polite"></div>
+  </dialog>
+</body>
+</html>

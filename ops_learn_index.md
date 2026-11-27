@@ -94,7 +94,7 @@ sigmoid 把任意实数压缩到 $(0, 1)$ 区间，常被解释为"概率/激活
 
 完整的 S 形曲线见附件（自包含 HTML，双击即可离线打开）：
 
-📈 [图0.1.1-2 Sigmoid 激活函数曲线（交互附件）](resources/chapter0/chapter0.1.1-sigmoid_activation_curve.html)
+[图0.1.1-2 Sigmoid 激活函数曲线](resources/chapter0/chapter0.1.1-sigmoid_activation_curve.html)
 
 注意曲线两端几乎水平——这叫**饱和区**：$z$ 太大或太小时，输出对输入变化几乎不敏感，梯度接近 0，学习会变得极慢。这是 sigmoid 的著名缺点，0.1.1.4 节会看到它的数学体现。
 
@@ -253,9 +253,9 @@ $$
 
 ##### 0.1.1.6 交互实验
 
-下面的实验台把 0.1.1.3～0.1.1.5 节的整套流程做成了可交互页面（自包含 HTML，双击即可离线打开）：改动输入、目标或学习率，所有中间量实时重算；点"梯度下降更新一步"就能看到参数被真实修改、损失下降。
+下面的实验台演示 0.1.1.3～0.1.1.5 节的整套流程。改动输入、目标或学习率，所有中间量会实时重算。点击「梯度下降更新一步」可以观察参数和损失的变化。
 
-🧪 [交互实验：单神经元一步训练实验台](resources/chapter0/chapter0.1.1-single_neuron_training_demo.html)
+[单神经元一步训练实验台](resources/chapter0/chapter0.1.1-single_neuron_training_demo.html)
 
 建议动手做三个小实验：
 

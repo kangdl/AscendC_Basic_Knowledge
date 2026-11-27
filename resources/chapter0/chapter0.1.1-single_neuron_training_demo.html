@@ -67,6 +67,9 @@ body { margin: 0; padding: var(--spacer-24); background: var(--surface-muted); c
 .trainer-widget .log { display: flex; flex-direction: column; gap: var(--spacer-4); border-top: 1px solid var(--border); padding-top: var(--spacer-12); }
 .trainer-widget .log .line { font: var(--weight-regular) var(--text-code) var(--font-mono); color: var(--text-muted); }
 .trainer-widget .log .line:first-child { color: var(--text); }
+:root[data-embedded] { color-scheme: light; overflow: hidden; --brand-on: #fff; }
+:root[data-embedded] body { padding: 0; background: transparent; }
+:root[data-embedded] :is(.page-head, .page-sub, .trainer-widget .title) { display: none; }
 </style>
 </head>
 <body>

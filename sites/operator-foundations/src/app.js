@@ -11,6 +11,10 @@ const mobileNav = matchMedia('(max-width: 850px)');
 let route;
 let searchOpener;
 const expandedBranches = new Set();
+const formulaResize = new ResizeObserver((entries) => {
+  for (const { target } of entries) fitFormula(target);
+});
+const resourceObservers = [];
 
 async function loadContent() {
   try {
@@ -274,6 +278,41 @@ function showTopic(index, page) {
     anchors.filter((section) => section.parentId === page.id).map((section) => tocLink(guide.id, section.id, section.title)).join(''));
 }
 
+function fitFormula(block) {
+  const formula = block.firstElementChild;
+  formula.style.zoom = 1;
+  const width = formula.getBoundingClientRect().width;
+  if (width > block.clientWidth && block.clientWidth > 0) {
+    formula.style.zoom = block.clientWidth / width;
+  }
+}
+
+function mountResource(frame) {
+  frame.addEventListener('load', () => {
+    if (!frame.isConnected || !frame.contentDocument) return;
+    const { documentElement, body } = frame.contentDocument;
+    const theme = getComputedStyle(document.documentElement);
+    const tokens = {
+      surface: 'card', 'surface-muted': 'rail', text: 'ink', 'text-muted': 'muted', border: 'rule',
+      brand: 'accent', 'brand-soft': 'sage', 'brand-text': 'sage-ink', 'chart-series-1': 'sage-ink',
+      'font-sans': 'sans', 'font-mono': 'mono',
+    };
+    documentElement.dataset.embedded = '';
+    for (const [name, token] of Object.entries(tokens)) {
+      documentElement.style.setProperty('--' + name, theme.getPropertyValue('--' + token));
+    }
+    const resize = () => {
+      const { marginTop, marginBottom } = frame.contentWindow.getComputedStyle(body);
+      const height = Math.max(body.scrollHeight, body.getBoundingClientRect().height);
+      frame.style.height = Math.ceil(height + parseFloat(marginTop) + parseFloat(marginBottom)) + 'px';
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(body);
+    resourceObservers.push(observer);
+    resize();
+  }, { once: true });
+}
+
 function renderRoute(initial = false) {
   const previous = route;
   route = readRoute();
@@ -281,10 +320,17 @@ function renderRoute(initial = false) {
   setNav(false);
   showSidebar();
   if (changedPage) {
+    formulaResize.disconnect();
+    for (const observer of resourceObservers.splice(0)) observer.disconnect();
     if (route.index < 0) showHome();
     else if (route.page) showTopic(route.index, route.page);
     else showChapter(route.index);
     main.querySelectorAll('.attention').forEach((figure) => updateAttention(figure, 3));
+    main.querySelectorAll('.math-display').forEach((block) => {
+      fitFormula(block);
+      formulaResize.observe(block);
+    });
+    main.querySelectorAll('.resource-embed iframe').forEach(mountResource);
   }
   document.title = route.index < 0 ? '算子研习册 · 算子基础知识' :
     (route.page?.title ?? guides[route.index].title) + ' · 算子研习册';

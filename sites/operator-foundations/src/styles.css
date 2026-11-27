@@ -207,6 +207,16 @@ tbody th, tbody td { border-top: 1px solid var(--rule); }
 tbody th { min-width: 8ch; }
 .prose { overflow-wrap: anywhere; }
 .prose p { margin: 8px 0 13px; }
+.math-display { margin: 12px 0; text-align: center; }
+.math-display .katex { display: inline-block; width: max-content; overflow-wrap: normal; }
+.resource-embed, .mermaid-figure { margin: 18px 0; }
+.resource-embed figcaption, .mermaid-figure figcaption { color: var(--muted); font-size: 14px; font-weight: 600; }
+.resource-embed figcaption { margin-bottom: 8px; }
+.resource-embed iframe { display: block; width: 100%; border: 0; }
+.mermaid-diagram { display: block; padding: 12px; border: 1px solid var(--rule); border-radius: 12px; background: var(--card); }
+.mermaid-diagram img { display: block; max-width: 100%; height: auto; margin-inline: auto; }
+.markdown-image { max-width: 100%; height: auto; vertical-align: middle; }
+.mermaid-figure figcaption { margin-top: 8px; }
 .prose a, .reading a { color: var(--accent); text-underline-offset: 3px; }
 .prose :is(ul, ol), .reading { padding-left: 24px; }
 .prose blockquote { padding: 8px 13px; border-left: 2px solid #b78b70; margin: 12px 0; background: var(--rail); color: var(--muted); }

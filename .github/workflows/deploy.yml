@@ -30,18 +30,19 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Install build dependencies
+        run: npm ci
+      - name: Install diagram rendering browser and fonts
+        run: |
+          npx playwright install --with-deps --only-shell chromium
+          sudo apt-get install -y fonts-noto-cjk
       - name: Build site
         run: node build.mjs
       - name: Verify public files
         shell: bash
         run: |
-          diff -u <(printf '%s\n' app.js content.json index.html styles.css) \
-            <(find dist -mindepth 1 -printf '%P\n' | LC_ALL=C sort)
-          for file in app.js content.json index.html styles.css; do
-            test -f "dist/$file" && test -s "dist/$file" && test ! -L "dist/$file" || exit 1
-          done
+          node verify-build.mjs
           node --input-type=module --check < dist/app.js
-          node -e "JSON.parse(require('node:fs').readFileSync('dist/content.json', 'utf8'))"
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:

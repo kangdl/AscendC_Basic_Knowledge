@@ -1,0 +1,9 @@
+{
+  "name": "operator-foundations",
+  "private": true,
+  "devDependencies": {
+    "katex": "0.19.1",
+    "mermaid": "12.3.0",
+    "playwright": "1.65.1"
+  }
+}

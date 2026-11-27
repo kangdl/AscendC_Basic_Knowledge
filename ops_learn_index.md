@@ -132,8 +132,8 @@ $$
 
 $$
 \begin{aligned}
-\frac{\partial L}{\partial a} &= a - y && \text{（损失对输出的敏感度）} \\
-\frac{\partial a}{\partial z} &= a(1 - a) && \text{（sigmoid 的导数，恰好能用输出 } a \text{ 表示）} \\
+\frac{\partial L}{\partial a} &= a - y && \text{（损失对输出的敏感度）} \cr
+\frac{\partial a}{\partial z} &= a(1 - a) && \text{（sigmoid 的导数，恰好能用输出 } a \text{ 表示）} \cr
 \frac{\partial z}{\partial w_1} &= x_1 && \text{（} z \text{ 对 } w_1 \text{ 的导数就是对应输入）}
 \end{aligned}
 $$
@@ -182,7 +182,7 @@ flowchart LR
 
 $$
 \begin{aligned}
-&\text{输入：} x_1 = 1,\ x_2 = 2 \qquad \text{目标：} y = 1 \\
+&\text{输入：} x_1 = 1,\ x_2 = 2 \qquad \text{目标：} y = 1 \cr
 &\text{参数：} w_1 = 0.5,\ w_2 = -0.3,\ b = 0.1 \qquad \text{学习率：} \eta = 0.5
 \end{aligned}
 $$
@@ -209,16 +209,16 @@ $$
 
 $$
 \begin{aligned}
-\frac{\partial L}{\partial a} &= a - y = 0.5 - 1 = -0.5 \\
-\frac{\partial a}{\partial z} &= a(1 - a) = 0.5 \times 0.5 = 0.25 \\
+\frac{\partial L}{\partial a} &= a - y = 0.5 - 1 = -0.5 \cr
+\frac{\partial a}{\partial z} &= a(1 - a) = 0.5 \times 0.5 = 0.25 \cr
 \delta &= (-0.5) \times 0.25 = -0.125
 \end{aligned}
 $$
 
 $$
 \begin{aligned}
-\frac{\partial L}{\partial w_1} &= \delta \, x_1 = -0.125 \times 1 = -0.125 \\
-\frac{\partial L}{\partial w_2} &= \delta \, x_2 = -0.125 \times 2 = -0.25 \\
+\frac{\partial L}{\partial w_1} &= \delta \, x_1 = -0.125 \times 1 = -0.125 \cr
+\frac{\partial L}{\partial w_2} &= \delta \, x_2 = -0.125 \times 2 = -0.25 \cr
 \frac{\partial L}{\partial b} &= \delta = -0.125
 \end{aligned}
 $$
@@ -229,8 +229,8 @@ $$
 
 $$
 \begin{aligned}
-w_1 &\leftarrow 0.5 - 0.5 \times (-0.125) = 0.5625 \\
-w_2 &\leftarrow -0.3 - 0.5 \times (-0.25) = -0.175 \\
+w_1 &\leftarrow 0.5 - 0.5 \times (-0.125) = 0.5625 \cr
+w_2 &\leftarrow -0.3 - 0.5 \times (-0.25) = -0.175 \cr
 b &\leftarrow 0.1 - 0.5 \times (-0.125) = 0.1625
 \end{aligned}
 $$
@@ -347,12 +347,12 @@ $$
 其中 $W^{(l)} \in \mathbb{R}^{n_l \times n_{l-1}}$，**第 $i$ 行恰好是第 $i$ 个神经元的权重**；$\sigma$ 对向量逐元素作用。把第一层展开写，就能看清"矩阵 = 一排神经元"：
 
 $$
-\begin{bmatrix} z^{(1)}_1 \\ z^{(1)}_2 \end{bmatrix}
+\begin{bmatrix} z^{(1)}_1 \cr z^{(1)}_2 \end{bmatrix}
 =
-\begin{bmatrix} w^{(1)}_{11} & w^{(1)}_{12} \\ w^{(1)}_{21} & w^{(1)}_{22} \end{bmatrix}
-\begin{bmatrix} x_1 \\ x_2 \end{bmatrix}
+\begin{bmatrix} w^{(1)}_{11} & w^{(1)}_{12} \cr w^{(1)}_{21} & w^{(1)}_{22} \end{bmatrix}
+\begin{bmatrix} x_1 \cr x_2 \end{bmatrix}
 +
-\begin{bmatrix} b^{(1)}_1 \\ b^{(1)}_2 \end{bmatrix}
+\begin{bmatrix} b^{(1)}_1 \cr b^{(1)}_2 \end{bmatrix}
 $$
 
 **为什么矩阵形式重要？** 不是数学上更高级，而是工程上更高效：矩阵乘法可以在 GPU/NPU 上大规模并行，一次算完一层成百上千个神经元。这正是深度学习框架把 **MatMul（矩阵乘）算子**作为核心算子的原因——本课程后续的算子开发与调优，很大程度上就是在优化这一步。
@@ -405,12 +405,12 @@ $$
 沿用图0.2-1 的网络，给定初始参数（中间量按全精度计算，显示保留四位小数）：
 
 $$
-x = \begin{bmatrix} 1 \\ 2 \end{bmatrix}, \qquad y = 1, \qquad \eta = 0.5
+x = \begin{bmatrix} 1 \cr 2 \end{bmatrix}, \qquad y = 1, \qquad \eta = 0.5
 $$
 
 $$
-W^{(1)} = \begin{bmatrix} 0.5 & -0.3 \\ 0.2 & 0.4 \end{bmatrix}, \quad
-b^{(1)} = \begin{bmatrix} 0.1 \\ -0.1 \end{bmatrix}, \quad
+W^{(1)} = \begin{bmatrix} 0.5 & -0.3 \cr 0.2 & 0.4 \end{bmatrix}, \quad
+b^{(1)} = \begin{bmatrix} 0.1 \cr -0.1 \end{bmatrix}, \quad
 W^{(2)} = \begin{bmatrix} 0.6 & -0.5 \end{bmatrix}, \quad
 b^{(2)} = 0.2
 $$
@@ -418,11 +418,11 @@ $$
 **（1）前向——隐藏层：**
 
 $$
-z^{(1)} = W^{(1)}x + b^{(1)} = \begin{bmatrix} 0.5 - 0.6 + 0.1 \\ 0.2 + 0.8 - 0.1 \end{bmatrix} = \begin{bmatrix} 0 \\ 0.9 \end{bmatrix}
+z^{(1)} = W^{(1)}x + b^{(1)} = \begin{bmatrix} 0.5 - 0.6 + 0.1 \cr 0.2 + 0.8 - 0.1 \end{bmatrix} = \begin{bmatrix} 0 \cr 0.9 \end{bmatrix}
 $$
 
 $$
-a^{(1)} = \sigma(z^{(1)}) \approx \begin{bmatrix} 0.5 \\ 0.7109 \end{bmatrix}
+a^{(1)} = \sigma(z^{(1)}) \approx \begin{bmatrix} 0.5 \cr 0.7109 \end{bmatrix}
 $$
 
 **（2）前向——输出层：**
@@ -454,23 +454,23 @@ $$
 **（5）反向——隐藏层（误差回传）：**
 
 $$
-W^{(2)\top}\delta^{(2)} \approx \begin{bmatrix} -0.0692 \\ 0.0577 \end{bmatrix}, \qquad a^{(1)}(1-a^{(1)}) \approx \begin{bmatrix} 0.25 \\ 0.2055 \end{bmatrix}
+W^{(2)\top}\delta^{(2)} \approx \begin{bmatrix} -0.0692 \cr 0.0577 \end{bmatrix}, \qquad a^{(1)}(1-a^{(1)}) \approx \begin{bmatrix} 0.25 \cr 0.2055 \end{bmatrix}
 $$
 
 $$
-\delta^{(1)} = \bigl(W^{(2)\top}\delta^{(2)}\bigr) \odot a^{(1)}(1-a^{(1)}) \approx \begin{bmatrix} -0.0173 \\ 0.0119 \end{bmatrix}
+\delta^{(1)} = \bigl(W^{(2)\top}\delta^{(2)}\bigr) \odot a^{(1)}(1-a^{(1)}) \approx \begin{bmatrix} -0.0173 \cr 0.0119 \end{bmatrix}
 $$
 
 注意 $\delta^{(1)}_2$ 是**正号**：隐藏神经元 2 的输出权重 $w^{(2)}_2 = -0.5$ 为负，"增大它的输出"反而有助于降低损失。梯度的方向完全由链式法则自动决定，不需要人为指定。
 
 $$
-\frac{\partial L}{\partial W^{(1)}} = \delta^{(1)} x^\top \approx \begin{bmatrix} -0.0173 & -0.0346 \\ 0.0119 & 0.0237 \end{bmatrix}, \qquad \frac{\partial L}{\partial b^{(1)}} = \delta^{(1)}
+\frac{\partial L}{\partial W^{(1)}} = \delta^{(1)} x^\top \approx \begin{bmatrix} -0.0173 & -0.0346 \cr 0.0119 & 0.0237 \end{bmatrix}, \qquad \frac{\partial L}{\partial b^{(1)}} = \delta^{(1)}
 $$
 
 **（6）更新全部 9 个参数（$\eta = 0.5$）：**
 
 $$
-W^{(1)} \leftarrow \begin{bmatrix} 0.5087 & -0.2827 \\ 0.1941 & 0.3881 \end{bmatrix}, \qquad b^{(1)} \leftarrow \begin{bmatrix} 0.1087 \\ -0.1059 \end{bmatrix}
+W^{(1)} \leftarrow \begin{bmatrix} 0.5087 & -0.2827 \cr 0.1941 & 0.3881 \end{bmatrix}, \qquad b^{(1)} \leftarrow \begin{bmatrix} 0.1087 \cr -0.1059 \end{bmatrix}
 $$
 
 $$

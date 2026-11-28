@@ -11,7 +11,7 @@ const path = (relative) => fileURLToPath(new URL(relative, import.meta.url));
 const statIfPresent = (file) => lstat(file).catch((error) => {
   if (error.code !== 'ENOENT') throw error;
 });
-const source = await readFile(path('../../ops_learn_index.md'), 'utf8');
+const source = await readFile(path('../../AscendC算子学习指导.md'), 'utf8');
 const stylesheet = await readFile(path('./src/styles.css'), 'utf8');
 const volume = source.match(/^# 第二卷 算子基础知识[ \t]*\r?$/m);
 // Top-level headings in fenced examples are comments. Parse the volume line by line.

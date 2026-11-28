@@ -8,7 +8,7 @@
 
 ## Markdown 与网站架构
 
-- `ops_learn_index.md` 的「第二卷 算子基础知识」提供正文。小节编号用于站内链接。
+- `AscendC算子学习指导.md` 的「第二卷 算子基础知识」提供正文。小节编号用于站内链接。
 - `sites/operator-foundations/guides.md` 提供章节导读和路由，通过原稿章节标题与正文关联。
 - 构建时将正文公式转为 MathML、Mermaid 转为静态图，并复制正文引用的本地图片和 HTML 附件。单独一行的 HTML 附件链接会嵌入正文。
 

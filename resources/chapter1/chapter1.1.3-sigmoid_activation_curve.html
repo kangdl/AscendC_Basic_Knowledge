@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>第一章附件 · 2-2-1 全连接网络训练实验台</title>
+<title>第一章附件 · Sigmoid 激活函数曲线</title>
 <script>
 window.MathJax = { tex: { inlineMath: [['\\(', '\\)']] }, svg: { fontCache: 'global' }, options: { enableMenu: false } };
 </script>
@@ -13,218 +13,81 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']] }, svg: { fontCache: 'glo
   color-scheme: light;
   --surface: #F7F7F8; --surface-muted: #EFEFF2; --text: #171717; --text-muted: #52525B;
   --border: rgba(23,23,23,0.12);
-  --brand: #0FDC78; --brand-soft: #E5FFF2; --brand-text: #004D26; --brand-on: #004D26;
-  --radius: 8px; --radius-card: 12px; --radius-full: 999px;
-  --spacer-4: 4px; --spacer-8: 8px; --spacer-12: 12px; --spacer-16: 16px; --spacer-20: 20px; --spacer-24: 24px;
+  --brand: #0FDC78; --brand-text: #004D26; --chart-series-1: #02743B;
+  --radius-card: 12px;
+  --spacer-12: 12px; --spacer-20: 20px; --spacer-24: 24px;
   --font-sans: "SF Pro Text","PingFang SC",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --font-mono: "JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --weight-regular: 400; --weight-medium: 500; --weight-strong: 600;
-  --text-caption: 12px/18px; --text-body: 14px/20px; --text-title: 16px/24px; --text-code: 13px/20px;
+  --weight-regular: 400; --weight-medium: 500;
+  --text-caption: 12px/18px; --text-body: 14px/20px; --text-title: 16px/24px;
 }
 :root[data-widget-theme="dark"] {
   color-scheme: dark;
   --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
   --border: rgba(229,229,229,0.12);
-  --brand: #32F08C; --brand-soft: #004D26; --brand-text: #E5FFF2;
+  --brand: #32F08C; --brand-text: #E5FFF2; --chart-series-1: #32F08C;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-widget-theme]) {
     color-scheme: dark;
     --surface: #171717; --surface-muted: #262626; --text: #E5E5E5; --text-muted: #A1A1AA;
     --border: rgba(229,229,229,0.12);
-    --brand: #32F08C; --brand-soft: #004D26; --brand-text: #E5FFF2;
+    --brand: #32F08C; --brand-text: #E5FFF2; --chart-series-1: #32F08C;
   }
 }
 body { margin: 0; padding: var(--spacer-24); background: var(--surface-muted); color: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); display: flex; justify-content: center; }
-.page { width: 100%; max-width: 960px; display: flex; flex-direction: column; gap: var(--spacer-12); }
+.page { width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: var(--spacer-12); }
 .page-head { font: var(--weight-medium) var(--text-title) var(--font-sans); }
 .page-sub { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
-.fc-widget { color: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); width: 100%; }
-.fc-widget .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--spacer-20); display: flex; flex-direction: column; gap: var(--spacer-16); }
-.fc-widget .head { display: flex; align-items: center; justify-content: space-between; gap: var(--spacer-12); flex-wrap: wrap; }
-.fc-widget .title { font: var(--weight-medium) var(--text-title) var(--font-sans); }
-.fc-widget .badge { font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--brand-text); background: var(--brand-soft); border-radius: var(--radius-full); padding: var(--spacer-4) var(--spacer-12); }
-.fc-widget .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--spacer-12); }
-.fc-widget .ctrl { display: flex; flex-direction: column; gap: var(--spacer-4); }
-.fc-widget .ctrl label { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
-.fc-widget .ctrl input { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-12); width: 100%; box-sizing: border-box; }
-.fc-widget .params { display: flex; flex-direction: column; gap: var(--spacer-8); }
-.fc-widget .prow { display: flex; gap: var(--spacer-8); flex-wrap: wrap; align-items: center; }
-.fc-widget .plabel { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); min-width: 64px; }
-.fc-widget .chip { font: var(--weight-medium) var(--text-code) var(--font-mono); background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-4) var(--spacer-12); }
-.fc-widget .stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--spacer-16); }
-.fc-widget .stage { background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-12); display: flex; flex-direction: column; gap: var(--spacer-8); }
-.fc-widget .stage.focus { border-color: var(--brand); }
-.fc-widget .stage h3 { margin: 0; font: var(--weight-medium) var(--text-body) var(--font-sans); }
-.fc-widget .row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--spacer-8); }
-.fc-widget .row .f { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
-.fc-widget .row .v { font: var(--weight-medium) var(--text-code) var(--font-mono); white-space: nowrap; }
-.fc-widget .row .v.big { font: var(--weight-strong) var(--text-title) var(--font-mono); color: var(--brand-text); }
-.fc-widget .actions { display: flex; gap: var(--spacer-12); align-items: center; flex-wrap: wrap; }
-.fc-widget button { font: var(--weight-medium) var(--text-body) var(--font-sans); border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-16); cursor: pointer; border: 1px solid var(--border); }
-.fc-widget button.primary { background: var(--brand); color: var(--brand-on); border-color: var(--brand); }
-.fc-widget button.ghost { background: var(--surface-muted); color: var(--text); }
-.fc-widget .rule { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
-.fc-widget .log { display: flex; flex-direction: column; gap: var(--spacer-4); border-top: 1px solid var(--border); padding-top: var(--spacer-12); }
-.fc-widget .log .line { font: var(--weight-regular) var(--text-code) var(--font-mono); color: var(--text-muted); }
-.fc-widget .log .line:first-child { color: var(--text); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--spacer-20); }
+.card > svg { display: block; width: 100%; height: auto; }
+.t { fill: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); }
+.ts { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.axis { stroke: var(--border); stroke-width: 1.5; fill: none; }
+.leader { stroke: var(--text-muted); stroke-width: .5; stroke-dasharray: 4 4; fill: none; opacity: .7; }
+.curve { stroke: var(--chart-series-1); stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.cap { fill: var(--surface); stroke: var(--border); }
+.fo-t { font: var(--weight-regular) var(--text-body) var(--font-sans); color: var(--text); }
+.fo-ts { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.fo-center { text-align: center; }
+.fo-nowrap { white-space: nowrap; }
+:root[data-embedded] { color-scheme: light; overflow: hidden; }
+:root[data-embedded] body { padding: 0; background: transparent; }
+:root[data-embedded] :is(.page-head, .page-sub) { display: none; }
 </style>
 </head>
 <body>
 <div class="page">
-  <div class="page-head">2-2-1 全连接网络 · 一步训练实验台</div>
-  <div class="page-sub">配套阅读：ops_learn_index.md §0.2.3 ｜ 自包含页面，可离线使用</div>
-  <div class="fc-widget" data-dynamic-ui-widget data-template="explanation-panel">
-    <div class="card">
-      <div class="head">
-        <span class="title">两层前向 → 损失 → 逐层反向 → 9 参数同步更新</span>
-        <span class="badge" data-f="stepbadge">已训练 0 步</span>
-      </div>
-      <div class="controls">
-        <div class="ctrl"><label>输入 \(x_1\)</label><input type="number" step="0.5" value="1" data-in="x1"></div>
-        <div class="ctrl"><label>输入 \(x_2\)</label><input type="number" step="0.5" value="2" data-in="x2"></div>
-        <div class="ctrl"><label>目标 \(y\)</label><input type="number" step="0.1" value="1" data-in="y"></div>
-        <div class="ctrl"><label>学习率 \(\eta\)</label><input type="number" step="0.1" value="0.5" data-in="eta"></div>
-      </div>
-      <div class="params">
-        <div class="prow">
-          <span class="plabel">\(W^{(1)}\)</span>
-          <span class="chip" data-f="w1a">0.5</span><span class="chip" data-f="w1b">-0.3</span>
-          <span class="chip" data-f="w1c">0.2</span><span class="chip" data-f="w1d">0.4</span>
-          <span class="plabel">\(b^{(1)}\)</span>
-          <span class="chip" data-f="b1a">0.1</span><span class="chip" data-f="b1b">-0.1</span>
-        </div>
-        <div class="prow">
-          <span class="plabel">\(W^{(2)}\)</span>
-          <span class="chip" data-f="w2a">0.6</span><span class="chip" data-f="w2b">-0.5</span>
-          <span class="plabel">\(b^{(2)}\)</span>
-          <span class="chip" data-f="b2">0.2</span>
-        </div>
-      </div>
-      <div class="stages">
-        <div class="stage">
-          <h3>① 前向</h3>
-          <div class="row"><span class="f">\(z^{(1)}_1\)</span><span class="v" data-f="z1a">0</span></div>
-          <div class="row"><span class="f">\(z^{(1)}_2\)</span><span class="v" data-f="z1b">0.9</span></div>
-          <div class="row"><span class="f">\(a^{(1)}_1\)</span><span class="v" data-f="a1a">0.5</span></div>
-          <div class="row"><span class="f">\(a^{(1)}_2\)</span><span class="v" data-f="a1b">0.7109</span></div>
-          <div class="row"><span class="f">\(z^{(2)}\)</span><span class="v" data-f="z2">0.1446</span></div>
-          <div class="row"><span class="f">\(a^{(2)}\)</span><span class="v" data-f="a2">0.5361</span></div>
-        </div>
-        <div class="stage focus">
-          <h3>② 损失</h3>
-          <div class="row"><span class="f">误差 \(a^{(2)} - y\)</span><span class="v" data-f="err">-0.4639</span></div>
-          <div class="row"><span class="f">\(L = \tfrac{1}{2}(a^{(2)}-y)^2\)</span><span class="v big" data-f="L">0.1076</span></div>
-        </div>
-        <div class="stage">
-          <h3>③ 反向（δ 逐层回传）</h3>
-          <div class="row"><span class="f">\(\delta^{(2)}\)</span><span class="v" data-f="d2">-0.1154</span></div>
-          <div class="row"><span class="f">\(\delta^{(1)}_1\)</span><span class="v" data-f="d1a">-0.0173</span></div>
-          <div class="row"><span class="f">\(\delta^{(1)}_2\)</span><span class="v" data-f="d1b">0.0119</span></div>
-        </div>
-        <div class="stage">
-          <h3>④ 梯度（外积）</h3>
-          <div class="row"><span class="f">\(\partial L/\partial W^{(2)}\)</span><span class="v" data-f="gW2">[-0.0577, -0.082]</span></div>
-          <div class="row"><span class="f">\(\partial L/\partial b^{(2)}\)</span><span class="v" data-f="gb2">-0.1154</span></div>
-          <div class="row"><span class="f">\(\partial L/\partial W^{(1)}\) 行1</span><span class="v" data-f="gW1r1">[-0.0173, -0.0346]</span></div>
-          <div class="row"><span class="f">\(\partial L/\partial W^{(1)}\) 行2</span><span class="v" data-f="gW1r2">[0.0119, 0.0237]</span></div>
-          <div class="row"><span class="f">\(\partial L/\partial b^{(1)}\)</span><span class="v" data-f="gb1">[-0.0173, 0.0119]</span></div>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="primary" data-act="update">梯度下降更新一步</button>
-        <button class="ghost" data-act="reset">重置</button>
-        <span class="rule">更新规则：\(W^{(l)} \leftarrow W^{(l)} - \eta\,\delta^{(l)}(a^{(l-1)})^\top\) ， \(b^{(l)} \leftarrow b^{(l)} - \eta\,\delta^{(l)}\)</span>
-      </div>
-      <div class="log" data-f="log">
-        <div class="line">初始状态：\(L \approx 0.1076\)，等待第一次更新…</div>
-      </div>
-    </div>
+  <div class="page-head">Sigmoid 激活函数曲线</div>
+  <div class="page-sub">配套阅读：AscendC算子学习指导.md §1.1.3（2） ｜ 绿点为数值实例的工作点 \(z=0 \to a=0.5\)</div>
+  <div class="card">
+    <svg viewBox="0 0 720 272" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sigmoid 激活函数曲线">
+      <path class="leader" d="M80 130 L680 130"/>
+      <path class="leader" d="M380 50 L380 210"/>
+      <path class="axis" d="M80 50 L80 210 L680 210"/>
+      <text class="ts" x="70" y="54" text-anchor="end">1</text>
+      <text class="ts" x="70" y="134" text-anchor="end">0.5</text>
+      <text class="ts" x="70" y="214" text-anchor="end">0</text>
+      <text class="ts" x="80" y="228" text-anchor="middle">−6</text>
+      <text class="ts" x="180" y="228" text-anchor="middle">−4</text>
+      <text class="ts" x="280" y="228" text-anchor="middle">−2</text>
+      <text class="ts" x="380" y="228" text-anchor="middle">0</text>
+      <text class="ts" x="480" y="228" text-anchor="middle">2</text>
+      <text class="ts" x="580" y="228" text-anchor="middle">4</text>
+      <text class="ts" x="680" y="228" text-anchor="middle">6</text>
+      <foreignObject x="300" y="236" width="160" height="28">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="fo-t fo-center">\(z\)（加权输入）</div>
+      </foreignObject>
+      <foreignObject x="80" y="26" width="140" height="26">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="fo-ts">\(a = \sigma(z)\)</div>
+      </foreignObject>
+      <polyline class="curve" points="80,209.6 130,208.9 180,207.1 230,202.4 280,190.9 330,167 355,149.6 380,130 405,110.4 430,93 480,69.1 530,57.6 580,52.9 630,51.1 680,50.4"/>
+      <circle cx="380" cy="130" r="5" fill="var(--brand)" stroke="var(--brand-text)" stroke-width="1"/>
+      <rect class="cap" x="420" y="146" width="260" height="24" rx="8"/>
+      <foreignObject x="428" y="148" width="248" height="22">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="fo-t fo-nowrap">工作点：\(z=0 \to a=0.5\)</div>
+      </foreignObject>
+    </svg>
   </div>
 </div>
-<script>
-(function () {
-  var root = document.querySelector('.fc-widget');
-  if (!root || root.dataset.mounted === 'true') return;
-  root.dataset.mounted = 'true';
-  var DEF = { x1: 1, x2: 2, y: 1, eta: 0.5 };
-  var INIT = { W1: [[0.5, -0.3], [0.2, 0.4]], b1: [0.1, -0.1], W2: [0.6, -0.5], b2: 0.2 };
-  var state, step;
-  function cloneInit() { return { W1: INIT.W1.map(function (r) { return r.slice(); }), b1: INIT.b1.slice(), W2: INIT.W2.slice(), b2: INIT.b2 }; }
-  state = cloneInit(); step = 0;
-  function q(k) { return root.querySelector('[data-f="' + k + '"]'); }
-  function inp(k) { return root.querySelector('[data-in="' + k + '"]'); }
-  function num(k, d) { var v = parseFloat(inp(k).value); return isNaN(v) ? d : v; }
-  function fmt(v) { var r = Math.round(v * 1e4) / 1e4; if (Object.is(r, -0)) r = 0; return r.toFixed(4).replace(/\.?0+$/, ''); }
-  function vec(a) { return '[' + fmt(a[0]) + ', ' + fmt(a[1]) + ']'; }
-  function sig(z) { return 1 / (1 + Math.exp(-z)); }
-  function typeset(el) { if (window.MathJax && MathJax.typesetPromise) { MathJax.typesetPromise([el]); } }
-  function compute() {
-    var x = [num('x1', DEF.x1), num('x2', DEF.x2)], y = num('y', DEF.y);
-    var z1 = [0, 0], a1 = [0, 0];
-    for (var i = 0; i < 2; i++) { z1[i] = state.W1[i][0] * x[0] + state.W1[i][1] * x[1] + state.b1[i]; a1[i] = sig(z1[i]); }
-    var z2 = state.W2[0] * a1[0] + state.W2[1] * a1[1] + state.b2;
-    var a2 = sig(z2);
-    var err = a2 - y, L = 0.5 * err * err;
-    var d2 = err * a2 * (1 - a2);
-    var gW2 = [d2 * a1[0], d2 * a1[1]], gb2 = d2;
-    var d1 = [0, 0], gW1 = [[0, 0], [0, 0]];
-    for (var j = 0; j < 2; j++) {
-      d1[j] = (state.W2[j] * d2) * a1[j] * (1 - a1[j]);
-      gW1[j][0] = d1[j] * x[0]; gW1[j][1] = d1[j] * x[1];
-    }
-    return { x: x, y: y, z1: z1, a1: a1, z2: z2, a2: a2, err: err, L: L, d2: d2, d1: d1, gW2: gW2, gb2: gb2, gW1: gW1, gb1: d1 };
-  }
-  function render() {
-    var c = compute();
-    q('w1a').textContent = fmt(state.W1[0][0]); q('w1b').textContent = fmt(state.W1[0][1]);
-    q('w1c').textContent = fmt(state.W1[1][0]); q('w1d').textContent = fmt(state.W1[1][1]);
-    q('b1a').textContent = fmt(state.b1[0]); q('b1b').textContent = fmt(state.b1[1]);
-    q('w2a').textContent = fmt(state.W2[0]); q('w2b').textContent = fmt(state.W2[1]); q('b2').textContent = fmt(state.b2);
-    q('z1a').textContent = fmt(c.z1[0]); q('z1b').textContent = fmt(c.z1[1]);
-    q('a1a').textContent = fmt(c.a1[0]); q('a1b').textContent = fmt(c.a1[1]);
-    q('z2').textContent = fmt(c.z2); q('a2').textContent = fmt(c.a2);
-    q('err').textContent = fmt(c.err); q('L').textContent = fmt(c.L);
-    q('d2').textContent = fmt(c.d2); q('d1a').textContent = fmt(c.d1[0]); q('d1b').textContent = fmt(c.d1[1]);
-    q('gW2').textContent = vec(c.gW2); q('gb2').textContent = fmt(c.gb2);
-    q('gW1r1').textContent = vec(c.gW1[0]); q('gW1r2').textContent = vec(c.gW1[1]); q('gb1').textContent = vec(c.gb1);
-    q('stepbadge').textContent = '已训练 ' + step + ' 步';
-    return c;
-  }
-  function addLog(text) {
-    var log = q('log');
-    var line = document.createElement('div');
-    line.className = 'line';
-    line.textContent = text;
-    log.insertBefore(line, log.firstChild);
-    while (log.children.length > 6) log.removeChild(log.lastChild);
-    typeset(line);
-  }
-  root.addEventListener('input', function (e) { if (e.target.matches('[data-in]')) render(); });
-  root.addEventListener('click', function (e) {
-    var btn = e.target.closest('[data-act]');
-    if (!btn) return;
-    if (btn.dataset.act === 'reset') {
-      state = cloneInit(); step = 0;
-      ['x1', 'x2', 'y', 'eta'].forEach(function (k) { inp(k).value = DEF[k]; });
-      q('log').innerHTML = '<div class="line">初始状态：\\(L \\approx 0.1076\\)，等待第一次更新…</div>';
-      typeset(q('log'));
-      render();
-      return;
-    }
-    var eta = Math.min(Math.max(num('eta', DEF.eta), 0.01), 2);
-    var c = compute();
-    for (var i = 0; i < 2; i++) {
-      state.W1[i][0] -= eta * c.gW1[i][0]; state.W1[i][1] -= eta * c.gW1[i][1];
-      state.b1[i] -= eta * c.gb1[i];
-    }
-    state.W2[0] -= eta * c.gW2[0]; state.W2[1] -= eta * c.gW2[1]; state.b2 -= eta * c.gb2;
-    step += 1;
-    var n = render();
-    addLog('第' + step + '步：9 个参数同步更新；\\(L\\) ' + fmt(c.L) + '→' + fmt(n.L) + '，\\(a^{(2)}\\) ' + fmt(c.a2) + '→' + fmt(n.a2));
-  });
-  render();
-})();
-</script>
 </body>
 </html>

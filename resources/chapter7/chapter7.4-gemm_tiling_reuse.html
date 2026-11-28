@@ -52,20 +52,23 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
       <div class="ctl"><label>M</label><input type="number" id="M" value="4096" min="1" step="1"></div>
       <div class="ctl"><label>N</label><input type="number" id="N" value="4096" min="1" step="1"></div>
       <div class="ctl"><label>K</label><input type="number" id="K" value="4096" min="1" step="1"></div>
-      <div class="ctl"><label>精度</label><select id="dtype"><option value="2" selected>fp16</option><option value="4">fp32</option></select></div>
+      <div class="ctl"><label>精度</label><select id="dtype"><option value="2" selected>fp16</option><option value="4">fp32</option><option value="1">fp8/int8</option><option value="0.5">mxfp4</option></select></div>
     </div>
     <div class="controls">
       <div class="ctl"><label>B_M</label><select id="BM"></select></div>
       <div class="ctl"><label>B_N</label><select id="BN"></select></div>
       <div class="ctl"><label>B_K</label><select id="BK"></select></div>
       <div class="ctl"><label><input type="checkbox" id="db" checked> 双缓冲</label></div>
-      <div class="ctl"><label>线程/block</label><input type="number" id="thr" value="256" min="32" step="32"></div>
+      <div class="ctl"><label>线程/block（GPU 对照）</label><input type="number" id="thr" value="256" min="32" step="32"></div>
     </div>
     <div class="controls">
-      <div class="ctl"><label>核数</label><input type="number" id="cores" value="108" min="1"></div>
-      <div class="ctl"><label>SMEM 上限 KB</label><input type="number" id="cap" value="164" min="16"></div>
-      <div class="ctl"><label>P_peak TFLOPS</label><input type="number" id="pp" value="312" min="1"></div>
-      <div class="ctl"><label>BW TB/s</label><input type="number" id="bw" value="2" min="0.1" step="0.1"></div>
+      <div class="ctl"><label>核数（AIC/SM）</label><input type="number" id="cores" value="36" min="1"></div>
+      <div class="ctl"><label>L1/SMEM 上限 KB</label><input type="number" id="cap" value="512" min="16"></div>
+      <div class="ctl"><label>L0C 上限 KB</label><input type="number" id="l0c" value="256" min="16"></div>
+      <div class="ctl"><label>P_peak TFLOPS</label><input type="number" id="pp" value="486" min="1"></div>
+      <div class="ctl"><label>BW TB/s</label><input type="number" id="bw" value="4" min="0.1" step="0.1"></div>
+      <button class="secondary" id="hwA2">A2·910B2</button>
+      <button class="secondary" id="hwA5DT">A5·950DT</button>
       <button class="secondary" id="preset128">经典 128/128/32</button>
       <button class="secondary" id="presetNaive">朴素 1/1/1</button>
     </div>
@@ -83,15 +86,16 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
       <div class="stat"><div class="k">算术强度 AI</div><div class="v" id="stAI">—</div></div>
       <div class="stat"><div class="k">脊点 AI*</div><div class="v" id="stRidge">—</div></div>
       <div class="stat"><div class="k">受限类型</div><div class="v" id="stType">—</div></div>
-      <div class="stat" id="boxSmem"><div class="k">SMEM 占用（含缓冲策略）</div><div class="v" id="stSmem">—</div></div>
+      <div class="stat" id="boxSmem"><div class="k">L1/SMEM 占用（含缓冲策略）</div><div class="v" id="stSmem">—</div></div>
     </div>
     <div class="state">
-      <div class="stat" id="boxReg"><div class="k">累加器寄存器 / 线程</div><div class="v" id="stReg">—</div></div>
+      <div class="stat" id="boxL0c"><div class="k">累加器 L0C 占用（fp32）</div><div class="v" id="stL0c">—</div></div>
+      <div class="stat" id="boxReg"><div class="k">累加器寄存器/线程（GPU 对照）</div><div class="v" id="stReg">—</div></div>
       <div class="stat"><div class="k">输出块数</div><div class="v" id="stBlocks">—</div></div>
       <div class="stat" id="boxWave"><div class="k">每核轮数（尾波）</div><div class="v" id="stWaves">—</div></div>
     </div>
     <div class="warns" id="warns"></div>
-    <div class="note">SMEM = 缓冲份数 × (B_M·B_K + B_K·B_N) × 元素字节；累加器 fp32 驻留寄存器，每线程 B_M·B_N/线程数 个。块数不足核数时出现空转核；轮数非整数时最后一轮只有部分核干活。</div>
+    <div class="note">L1/SMEM = 缓冲份数 × (B_M·B_K + B_K·B_N) × 元素字节；昇腾累加器 fp32 常驻 L0C（B_M·B_N×4B），GPU 对照摊到每线程 B_M·B_N/线程数 个寄存器。块数不足核数时出现空转核；轮数非整数时最后一轮只有部分核干活。硬件预设：A2·910B2 = 24 AIC / L1 512KB / L0C 128KB / 353T / 1.6TB/s；A5·950DT = 36 AIC / L1 512KB / L0C 256KB / 486T / 4TB/s。</div>
   </div>
 
   <div class="card">
@@ -132,6 +136,8 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
   fillSel('BK', [1, 16, 32, 64, 128], 32);
   $('preset128').onclick = function () { $('BM').value = 128; $('BN').value = 128; $('BK').value = 32; refresh(); };
   $('presetNaive').onclick = function () { $('BM').value = 1; $('BN').value = 1; $('BK').value = 1; refresh(); };
+  $('hwA2').onclick = function () { $('cores').value = 24; $('cap').value = 512; $('l0c').value = 128; $('pp').value = 353; $('bw').value = 1.6; refresh(); };
+  $('hwA5DT').onclick = function () { $('cores').value = 36; $('cap').value = 512; $('l0c').value = 256; $('pp').value = 486; $('bw').value = 4; refresh(); };
 
   function fmtBytes(b) {
     if (b >= 1e12) return (b / 1e12).toFixed(2) + ' TB';
@@ -154,7 +160,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
       M: Math.max(1, +$('M').value || 1), N: Math.max(1, +$('N').value || 1), K: Math.max(1, +$('K').value || 1),
       BM: +$('BM').value, BN: +$('BN').value, BK: +$('BK').value,
       eb: +$('dtype').value, db: $('db').checked, thr: Math.max(32, +$('thr').value || 256),
-      cores: Math.max(1, +$('cores').value || 1), cap: +$('cap').value * 1024,
+      cores: Math.max(1, +$('cores').value || 1), cap: +$('cap').value * 1024, l0c: +$('l0c').value * 1024,
       pp: +$('pp').value * 1e12, bw: +$('bw').value * 1e12
     };
   }
@@ -170,6 +176,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
     var ridge = p.pp / p.bw;
     var stages = p.db ? 2 : 1;
     var smem = stages * p.eb * (p.BM * p.BK + p.BK * p.BN);
+    var accBytes = 4 * p.BM * p.BN;
     var regPerThr = p.BM * p.BN / p.thr;
     var blocks = ceilDiv(p.M, p.BM) * ceilDiv(p.N, p.BN);
     var waves = ceilDiv(blocks, p.cores);
@@ -182,16 +189,19 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
     $('stRidge').textContent = ridge.toFixed(0) + ' FLOP/B';
     $('stType').innerHTML = ai < ridge ? '<span class="badge mem">访存受限</span>' : '<span class="badge compute">计算受限</span>';
     $('stSmem').textContent = fmtBytes(smem) + ' / ' + fmtBytes(p.cap);
+    $('stL0c').textContent = fmtBytes(accBytes) + ' / ' + fmtBytes(p.l0c);
     $('stReg').textContent = regPerThr.toFixed(0) + ' 个 fp32';
     $('stBlocks').textContent = blocks;
     $('stWaves').textContent = waves + ' 轮' + (blocks % p.cores ? '（尾波 ' + (blocks % p.cores) + '/' + p.cores + ' 核）' : '（满轮）');
 
     $('boxSmem').className = 'stat' + (smem > p.cap ? ' warn' : '');
+    $('boxL0c').className = 'stat' + (accBytes > p.l0c ? ' warn' : '');
     $('boxReg').className = 'stat' + (regPerThr > 255 ? ' warn' : '');
     $('boxWave').className = 'stat' + (blocks < p.cores ? ' warn' : '');
     var w = [];
-    if (smem > p.cap) w.push('SMEM 超限：块装不下片上内存，需减小 B_M/B_N/B_K 或关双缓冲。');
-    if (regPerThr > 255) w.push('寄存器压力过大（>255/线程）：累加器将溢出到 local memory，性能崩盘。');
+    if (smem > p.cap) w.push('L1/SMEM 超限：A/B 小片装不下片上缓存，需减小 B_M/B_N/B_K 或关双缓冲。');
+    if (accBytes > p.l0c) w.push('L0C 超限：fp32 累加器装不下输出块，需减小 B_M/B_N（昇腾侧最硬的容量天花板）。');
+    if (regPerThr > 255) w.push('GPU 对照：寄存器压力过大（>255/线程），累加器将溢出到 local memory。');
     if (blocks < p.cores) w.push('块数不足核数：' + (p.cores - blocks) + ' 个核空转，并行度约束压过复用率约束。');
     $('warns').textContent = w.join(' ');
 
@@ -250,13 +260,13 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
     // 箭头示意
     svg.appendChild(el('text', { x: 235, y: 140, 'font-size': 16, fill: '#64748b' }, '→'));
     svg.appendChild(el('text', { x: 445, y: 160, 'font-size': 16, fill: '#64748b' }, '→'));
-    svg.appendChild(el('text', { x: 20, y: 30, 'font-size': 12, fill: '#64748b' }, '蓝 = A 条带（B_M×B_K）  绿 = B 条带（B_K×B_N）  橙 = 本 program 的输出块（B_M×B_N）'));
+    svg.appendChild(el('text', { x: 20, y: 30, 'font-size': 12, fill: '#64748b' }, '蓝 = A 条带（B_M×B_K）  绿 = B 条带（B_K×B_N）  橙 = 本核的输出块（B_M×B_N）'));
     // 进度与搬运账
     var moved = kStep * (p.BM * p.BK + p.BK * p.BN) * p.eb;
     $('kInfo').textContent = 'K 循环：' + kStep + ' / ' + T + ' 段 · 本块已搬 ' + fmtBytes(moved);
     $('reuseInfo').textContent = kStep >= T
       ? 'K 循环结束：累加器写回 C 一次。整个过程中 A 条带在块内被 B_N=' + p.BN + ' 列复用、B 条带被 B_M=' + p.BM + ' 行复用——复用全部发生在片上，HBM 只为此块搬了 ' + fmtBytes(moved) + '。'
-      : '每段把蓝/绿条带搬进片上，tl.dot 累加进橙色块的 fp32 累加器；条带用完即丢，下一段再搬。点击"下一段 K"观察沿 K 的推进。';
+      : '每段把蓝/绿条带搬进片上（HBM→L1→L0），Mmad/tl.dot 累加进橙色块的 fp32 累加器（L0C/寄存器）；条带用完即丢，下一段再搬。点击"下一段 K"观察沿 K 的推进。';
   }
 
   $('btnStep').onclick = function () {
@@ -274,7 +284,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
       kStep++; draw();
     }, 500);
   };
-  ['M', 'N', 'K', 'BM', 'BN', 'BK', 'dtype', 'db', 'thr', 'cores', 'cap', 'pp', 'bw'].forEach(function (id) {
+  ['M', 'N', 'K', 'BM', 'BN', 'BK', 'dtype', 'db', 'thr', 'cores', 'cap', 'l0c', 'pp', 'bw'].forEach(function (id) {
     $(id).addEventListener('change', function () { stopPlay(); refresh(); });
   });
   ['pm', 'pn'].forEach(function (id) { $(id).addEventListener('change', function () { kStep = 0; draw(); }); });

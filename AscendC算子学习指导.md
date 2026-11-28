@@ -4721,44 +4721,46 @@ flowchart TD
 
 > **学习目标**
 > - 用"计算量、访存量、片上容量、并行度"四约束账本说清为什么需要 Tiling，以及 Tiling 在优化什么
-> - 写出算术强度与 Roofline 公式，手算一个算子的 AI 并判断它是计算受限还是访存受限
-> - 用 Triton 写出带掩码的分块向量加法，解释主块、尾块与对齐约束
-> - 推导分块 GEMM 的复用率公式 $AI \approx B_M B_N / (B_M + B_N)$ ，说清块大小的三方权衡
+> - 写出算术强度与 Roofline 公式，手算一个算子的 AI 并判断它在 A2/A5 上是计算受限还是访存受限
+> - 用 AscendC 写出 host 侧 tiling 函数与核内 CopyIn/Compute/CopyOut 三段流水，解释主块、尾块与 DataBlock 对齐
+> - 推导分块 GEMM 的复用率公式 $AI \approx B_M B_N / (B_M + B_N)$ ，说清块大小在 L1/L0C/UB 容量与 Cube 核并行度之间的权衡
 > - 解释归约轴为什么不能朴素分块，写出 Online Softmax 的递推并说明它何时必须登场
 > - 说清 FlashAttention 的 IO 感知分块、因果掩码跳块，以及 Prefill 与 Decode 的 tile 策略差异
 > - 读懂 BSND/BNSD/TND/NTD 与 PA_BBND/PA_BNBD/PA_NZ 七种 Attention 排布，会按访问模式选型
-> - 建立"Profiling → 判断受限类型 → 改一个参数 → 复测"的调优闭环，知道何时该借助自动调优
+> - 建立"Profiling → 判断受限类型 → 改一个参数 → 复测"的调优闭环，知道何时该借助 TilingSolver 自动搜索
 
 ### 7.1 引言：Tiling 要解决的问题
 
-第二章我们拆完了 Transformer 的数学骨架，第三章用 Triton 把公式变成了能跑的代码。但"能跑"和"跑得快"之间隔着一道大模型工程师每天都要跨的坎：**芯片算得飞快，数据却搬不过来**。本章的主题 Tiling（分块），就是跨越这道坎的核心方法论。
+第二章我们拆完了 Transformer 的数学骨架，第三章见识了 Triton 的 tile 级抽象。但"能跑"和"跑得快"之间隔着一道大模型工程师每天都要跨的坎：**芯片算得飞快，数据却搬不过来**。本章的主题 Tiling（分块），就是跨越这道坎的核心方法论——而且我们是昇腾算子开发者，全章的账都算在达芬奇架构的 Cube 核、Vector 核与它们身边的 Buffer 上。
 
 和第一章"从单个神经元到全连接网络"一样，本章也走一条阶梯：先把**一个元素**的搬运账算清（7.1～7.3），再升级到**一个矩阵**（7.4）、**一行归约**（7.5）、**一个 Attention**（7.6），然后回头看数据该怎么**摆**（7.7），最后落到**工程调优**（7.8～7.9）。每一级都在回答同一个问题——**四个约束下，怎么切块最划算？**
+
+**硬件口径约定**：本章示例以 **A5（昇腾 950PR/950DT）** 为主、**A2（昇腾 910B）/A3（昇腾 910C）** 次之。三代的关系一句话：A2 是达芬奇第二代（Cube/Vector 分离架构的起点），A3 是 A2 的双 Die 合封翻倍，A5 是第三代达芬奇（低精度原生、L0C/UB 扩容）。910B 按 SKU（B1～B4）有核数/频率/L2 裁剪，文中取 910B2 典型值；上机一律以 `npu-smi info` 与 CANN `GetCoreMemSize` 查询为准。GPU 只在两生态差异显著处作对照出现。
 
 #### 7.1.1 两笔账：为什么不能把整个张量一次性搬进片上内存
 
 **(1) 容量账：厨房台面放不下整个仓库**
 
-芯片的存储像一个厨房：显存（HBM）是**仓库**，大而远；片上内存（GPU 的 Shared Memory / 昇腾的 UB）是**案板**，小而快，就在计算单元手边。做菜（计算）只能在案板上进行，所以食材必须先从仓库搬到案板。
+芯片的存储像一个厨房：显存（HBM）是**仓库**，大而远；片上 Buffer（Vector 核的 UB、Cube 核的 L1/L0）是**案板**，小而快，就在计算单元手边。做菜（计算）只能在案板上进行，所以食材必须先从仓库搬到案板。
 
-问题是案板有多小？一个 $4096 \times 4096$ 的 fp16 矩阵占 $4096^2 \times 2\text{B} = 32\text{MB}$ ，而 A100 每个 SM 的片上 SRAM 只有约 192 KB——**差了约 170 倍**；即便把全片 108 个 SM 的 SRAM 全加起来（约 20 MB），也装不下这一个矩阵，更别提 Attention 里 $N \times N$ 的分数矩阵还要再翻几倍。
+问题是案板有多小？一个 $4096 \times 4096$ 的 fp16 矩阵占 $4096^2 \times 2\text{B} = 32\text{MB}$ ，而 A5 每个 Vector 核的 UB 只有 256 KB（用户可用约 248 KB）——**差了约 130 倍**；A2 的 UB 是 192 KB，差约 170 倍。Cube 侧的 L1 也才 512 KB。整芯片共享的 L2（A5 为 128 MB）虽然装得下一个矩阵，但 L2 不是计算工作区——**计算只能在 L0/UB 里发生**，L2 只是仓库与案板之间的中转站。
 
-结论：**大张量不可能一次性搬进片上内存，只能切成小块，搬一块、算一块、丢一块**。这个"切多大、怎么切、谁算哪块"的决策，就是 Tiling。
+结论：**大张量不可能一次性搬进计算单元身边的 Buffer，只能切成小块，搬一块、算一块、丢一块**。这个"切多大、怎么切、谁算哪块"的决策，就是 Tiling。
 
-**(2) 时间账：搬 1 个字节的工夫，够算 156 次**
+**(2) 时间账：搬 1 个字节的工夫，够算上百次**
 
-就算装得下，搬运本身也慢得惊人。以 A100（80GB SXM 版）为例：
+就算装得下，搬运本身也慢得惊人。以 A5 的 950DT（满配）为例：
 
-- 峰值算力（fp16 Tensor Core）：约 312 TFLOPS，即每秒 $3.12 \times 10^{14}$ 次浮点运算；
-- 显存带宽：约 2 TB/s，即每秒搬 $2 \times 10^{12}$ 字节。
+- Cube 峰值算力（fp16）：约 486 TFLOPS，即每秒 $4.86 \times 10^{14}$ 次浮点运算；
+- 显存带宽：约 4 TB/s，即每秒搬 $4 \times 10^{12}$ 字节。
 
 两者相除：
 
 $$
-\frac{312\ \text{TFLOPS}}{2\ \text{TB/s}} = 156\ \text{FLOP/B}
+\frac{486\ \text{TFLOPS}}{4\ \text{TB/s}} \approx 122\ \text{FLOP/B}
 $$
 
-**从显存搬 1 个字节的时间，计算单元够做 156 次 fp16 运算**。这意味着：如果一个算子每搬 1 字节只做几次运算（比如逐元素加法：读两个数、写一个数共 12 字节，只做 1 次加法），计算单元 99% 以上的时间都在干等数据。第二章 2.5.1 说注意力"不是算不动，是搬不动"，根源就在这笔账里。
+**从显存搬 1 个字节的时间，Cube 核够做约 122 次 fp16 运算**。A2（910B2：353 TFLOPS / 1.6 TB/s）这个比值更高，约 221。这意味着：如果一个算子每搬 1 字节只做几次运算（比如逐元素加法：读两个数、写一个数共 12 字节，只做 1 次加法），计算单元 99% 以上的时间都在干等数据。第二章 2.5.1 说注意力"不是算不动，是搬不动"，根源就在这笔账里。
 
 所以算子的耗时不由计算量单独决定，而是：
 
@@ -4766,7 +4768,7 @@ $$
 T \approx \max\Bigl(\underbrace{\tfrac{\text{FLOPs}}{P_{\text{peak}}}}_{\text{计算时间}},\ \underbrace{\tfrac{\text{Bytes}}{BW}}_{\text{搬运时间}}\Bigr) + \text{调度开销}
 $$
 
-**Tiling 的本质：在片上容量装得下的前提下，通过"切块 + 复用"把搬运量 Bytes 压下去，同时让计算单元和搬运通道都忙起来。** 7.2 节的 Roofline 模型会把这笔账画成一张图。
+**Tiling 的本质：在片上容量装得下的前提下，通过"切块 + 复用"把搬运量 Bytes 压下去，同时让计算单元和搬运引擎（MTE）都忙起来。** 7.2 节的 Roofline 模型会把这笔账画成一张图。
 
 #### 7.1.2 四约束账本：贯穿全章的分析框架
 
@@ -4776,12 +4778,12 @@ $$
 |---|---|---|---|
 | **计算量** | 总共要算多少次？ | 算子数学定义（如 GEMM 为 $2MNK$ ） | 不变（分块不改变数学结果） |
 | **访存量** | 要从显存搬多少字节？ | 块大小决定的**数据复用率** | 块越大复用越多、搬运越少 |
-| **片上容量** | 一个块装得进案板吗？ | SMEM/UB 大小、寄存器数量 | 块越大占用越多，超限直接编译失败或溢出 |
-| **并行度** | 块够不够分给所有核？ | 块总数 vs 核数、每核负载是否均衡 | 块越大块数越少，核会空转 |
+| **片上容量** | 一个块装得进案板吗？ | UB/L1/L0A/L0B/L0C 大小 | 块越大占用越多，超限直接编译失败或溢出 |
+| **并行度** | 块够不够分给所有核？ | 块总数 vs AIC/AIV 核数、每核负载是否均衡 | 块越大块数越少，核会空转 |
 
 *表7.1.2-1 Tiling 的四约束账本：访存量与并行度天然互相拉扯*
 
-注意第二行和第四行的**矛盾**：块切大 → 复用率高 → 搬得少（好事），但块总数变少 → 不够分给所有核（坏事）。**Tiling 没有万能最优解，只有具体 shape、具体硬件下的权衡解**。这也是为什么工业界要靠自动调优（7.8.2）而不是背一张"最佳块大小表"。
+注意第二行和第四行的**矛盾**：块切大 → 复用率高 → 搬得少（好事），但块总数变少 → 不够分给所有核（坏事）。**Tiling 没有万能最优解，只有具体 shape、具体硬件下的权衡解**。这也是为什么工业界要靠自动搜索（7.8.2 的 TilingSolver）而不是背一张"最佳块大小表"。
 
 #### 7.1.3 核心术语：主块、尾块、对齐与 Tiling 函数
 
@@ -4798,42 +4800,44 @@ $$
 - **主块（full tile）**：被数据完整填满的块；
 - **尾块（tail tile / partial tile）**：最后一块装不满，有效元素数 $= N \bmod \text{块长}$ （整除时没有尾块）。
 
-大模型的真实 shape 几乎从不整除：序列长度是用户输入决定的，词表大小是 32000、151936 这类"怪数"。**尾块处理是正确性的第一道坎**（7.3.3 用掩码解决），也是性能的一道坎（尾块那一批核干的活少，却照样占一轮调度）。
+大模型的真实 shape 几乎从不整除：序列长度是用户输入决定的，词表大小是 32000、151936 这类"怪数"。**尾块处理是正确性的第一道坎**（7.3.3 解决），也是性能的一道坎（尾块那一批核干的活少，却照样占一轮调度）。
 
 **(2) 对齐与 DataBlock**
 
 硬件搬数据不是按"1 个元素"搬的，而是按**固定粒度的段**搬：
 
-- NVIDIA GPU：一次合并访存事务以 32 B / 128 B 为单位，`float4` 向量化加载一次取 16 B；
-- 昇腾：搬运的最小对齐单元叫 **DataBlock = 32 字节**——fp16 时恰好 16 个元素，int8 时 32 个元素。
+- 昇腾：搬运的最小对齐单元叫 **DataBlock = 32 字节**——fp16 时恰好 16 个元素，int8 时 32 个元素。`DataCopy` 的源地址、目的地址、长度都须按 32 B 对齐，不对齐就要走 `DataCopyPad` 之类的补垫搬运；
+- Cube 核更进一步：16×16×16 的基本算块要求操作数按 **NZ 分形**排布（fp16 的 $D_0 = 16$ 正是 32 B），7.7 节的 PA_NZ 排布就是同一思想在 KV Cache 上的固化；
+- GPU 对照：一次合并访存事务以 32 B / 128 B 为单位，`float4` 向量化加载一次取 16 B。
 
-块边界若不对齐这些粒度，一次搬运就会跨段、拆成多次事务，带宽利用率打折。所以块大小通常取 16 / 32 / 64 / 128 这类数，**不是玄学，是对齐粒度 × 向量化宽度的整数倍**。7.7 节会看到昇腾 PA_NZ 排布干脆把"32 B 对齐"固化进了存储格式。
+块大小通常取 16 / 32 / 64 / 128 这类数，**不是玄学，是对齐粒度 × 向量化宽度的整数倍**。
 
 **(3) Tiling 策略 / Tiling 函数**
 
 - **Tiling 策略**：给定输入 shape 和硬件参数，决定"块多大、切几块、分给几个核、尾块怎么办"的完整方案；
-- **Tiling 函数**：昇腾 AscendC 里把这套决策写成 host 侧代码——输入 shape，输出块参数结构体，kernel 启动前算好。GPU 侧对应的是 Triton 的 `grid` 计算与 `BLOCK_SIZE` 选择（7.8.2 的 autotune 就是自动搜索这个函数）。
+- **Tiling 函数**：AscendC 里这套决策是**显式的 host 侧代码**——输入 shape，输出块参数结构体（`TilingData`），kernel 启动前算好，核内通过 `GET_TILING_DATA` 取用（7.3.2 给完整例子）。GPU 侧对应 Triton 的 `grid` 计算与 `BLOCK_SIZE` 选择，决策藏在 Python 启动代码里——**昇腾把 Tiling 当成一等公民，这正是我们作为昇腾开发者的主场**。
 
 **(4) 片上内存的名字对照**
 
-不同生态对"案板"的叫法不同，先混个脸熟（容量与层级细节见 7.2.1 与第五章）：
-
-| 角色 | NVIDIA GPU | 昇腾 AI Core |
+| 角色 | 昇腾 AI Core | NVIDIA GPU（对照） |
 |---|---|---|
-| 计算单元私有、最快 | 寄存器（Register） | 寄存器 / L0A、L0B、L0C |
-| 核内共享的"案板" | Shared Memory（SMEM） | Unified Buffer（UB）、L1 Buffer |
-| 全片共享的中间缓存 | L2 Cache | L2 Buffer |
-| 仓库 | HBM（显存） | HBM（显存） |
+| 矩阵操作数暂存 | L0A / L0B（各 64 KB） | 寄存器 / SMEM 中的操作数片段 |
+| 矩阵累加器 | **L0C**（A2 128 KB / A5 256 KB） | 寄存器中的累加器 |
+| Cube 输入缓存 | L1 Buffer（512 KB） | — |
+| Vector 工作区 | **UB**（A2 192 KB / A5 256 KB） | Shared Memory（每 SM 约 164 KB 可用） |
+| Cube-Vector 直通道 | SSBuffer（A5，256 KB） | —（SMEM 内交换） |
+| 全片共享中间缓存 | L2（A2 192 MB / A5 128 MB） | L2 Cache |
+| 仓库 | HBM | HBM |
 
-*表7.1.3-1 片上存储的角色对照：名字不同，"小而快 vs 大而慢"的矛盾相同*
+*表7.1.3-1 片上存储角色对照：昇腾按 Cube/Vector 分工配 Buffer，GPU 按 SM 统一配 SMEM——名字不同，"小而快 vs 大而慢"的矛盾相同*
 
 #### 7.1.4 本章路线图
 
 ```mermaid
 flowchart LR
     A["一个元素怎么搬<br/>7.1 四约束账本"] --> B["一张图判断瓶颈<br/>7.2 Roofline"]
-    B --> C["第一个分块内核<br/>7.3 向量加法 + 掩码"]
-    C --> D["一个矩阵怎么切<br/>7.4 分块 GEMM"]
+    B --> C["第一个分块内核<br/>7.3 AscendC 向量加法"]
+    C --> D["一个矩阵怎么切<br/>7.4 Cube 分块 GEMM"]
     D --> E["一行归约怎么切<br/>7.5 Online Softmax"]
     E --> F["一个 Attention 怎么切<br/>7.6 FlashAttention / KV Cache"]
     F --> G["数据怎么摆<br/>7.7 Layout 七排布"]
@@ -4846,36 +4850,45 @@ flowchart LR
 
 写 kernel 之前先学会"纸上谈兵"：给定算子和硬件，**不跑代码就能估出它快不快、瓶颈在哪**。这是 Tiling 调优的第一生产力——7.8 节的 Profiling 只是验证这套估算的工具。
 
-#### 7.2.1 内存层级：一个金字塔
+#### 7.2.1 内存层级：达芬奇的 Buffer 金字塔
 
-GPU 的存储是严格分层的，越靠近计算单元越快、越小、越贵（以 A100 为参照，数量级感受）：
+昇腾 AI Core 的存储严格分层，越靠近计算单元越快、越小。三代容量对照（数据与第六章 6.7 同源）：
 
-| 层级 | 容量（A100） | 带宽量级 | 延迟量级 | 谁在用 |
+| 层级 | 用途 | A2（910B2） | A3（910C，每 Die） | A5（950） |
 |---|---|---|---|---|
-| 寄存器 | 每 SM 256 KB | 数十 TB/s（聚合） | ~1 周期 | 单线程私有，累加器住这里 |
-| Shared Memory / L1 | 每 SM 192 KB | ~19 TB/s（聚合） | ~20–30 周期 | 一个线程块共享，tile 住这里 |
-| L2 Cache | 全片 40 MB | ~5 TB/s | ~200 周期 | 全片共享，跨块复用靠它 |
-| HBM（显存） | 40–80 GB | ~1.5–2 TB/s | ~400–600 周期 | 所有张量的"家" |
+| L1 Buffer | Cube 输入缓存 | 512 KB | 512 KB | 512 KB |
+| L0A / L0B | Cube 左/右操作数 | 64 KB / 64 KB | 同左 | 64 KB / 64 KB |
+| L0C | Cube 累加/中间结果 | 128 KB | 128 KB | **256 KB** |
+| UB（每 Vector 核） | Vector 工作区 | 192 KB | 192 KB | **256 KB**（可用 248 KB） |
+| SSBuffer | Cube-Vector 直通道 | — | — | **256 KB** |
+| L2（整芯片共享） | 跨核复用 | 192 MB（B4 裁到 96 MB） | 未公开 | 128 MB 统一访问 |
+| HBM | 仓库 | 64 GB @ 1.6 TB/s | 128 GB @ 3.2 TB/s | PR 128 GB @ 1.6 / DT 144 GB @ **4 TB/s** |
 
-*表7.2.1-1 GPU 内存金字塔：相邻层级带宽差约 4–10 倍，容量差约 100–1000 倍（延迟为数量级参考）*
+*表7.2.1-1 三代片上存储对照：最大单点升级在 L0C 与 UB（128→256 KB、192→256 KB），直接服务于 FlashAttention 与大 tile；L1/L0A/L0B 三代未动——16×16×16 基本算块稳定*
 
 ```mermaid
 flowchart TB
-    R["寄存器<br/>每 SM 256 KB · ~1 周期"] --- S["Shared Memory / L1<br/>每 SM 192 KB · ~20-30 周期"]
-    S --- L["L2 Cache<br/>全片 40 MB · ~200 周期"]
-    L --- H["HBM 显存<br/>80 GB · ~400-600 周期"]
-    H -. "Tiling 要最小化的就是这条边的流量" .-> S
+    L0["L0A/L0B 64KB → PE 阵列 → L0C 128/256KB<br/>（Cube 核：矩阵计算）"]
+    UB["UB 192/256KB<br/>（Vector 核：向量计算）"]
+    L1["L1 Buffer 512KB<br/>（Cube 输入缓存）"]
+    L2["L2 Cache 128~192MB<br/>（全片共享）"]
+    H["HBM 64~144GB<br/>（仓库）"]
+    L1 --- L0
+    L1 --- L2
+    UB --- L2
+    L2 --- H
+    L0 -. "A5：SSBuffer 直通道 / L0C 随路量化" .-> UB
 ```
 
-*图7.2.1-1 内存金字塔：Tiling 的目标是让数据尽量住在上层，少跑最下面那条长路*
+*图7.2.1-1 达芬奇 Buffer 金字塔：Tiling 的目标是让数据尽量住在上层，少跑 HBM 那条长路*
 
 三个直接推论：
 
-1. **tile 的"家"是 Shared Memory**：块大小首先受 SMEM 容量约束（四约束之三）；
-2. **累加器要住寄存器**：GEMM 的 $B_M \times B_N$ 输出块若用 fp32 累积，占 $4 B_M B_N$ 字节寄存器，分摊到每个线程（7.4.4 细算）；
-3. **L2 是"隐形复用层"**：不同线程块读到同一块数据时可能命中 L2 而不必真跑 HBM——所以实测访存量常比理论账本好看，块调度顺序（swizzle）能主动利用这一点（7.4.4）。
+1. **Vector 算子的 tile 住在 UB**：块大小首先受 UB 容量约束（四约束之三），A5 比 A2 多出 64 KB 就是给大 tile 的本钱；
+2. **GEMM 的累加器住在 L0C**： $B_M \times B_N$ 输出块用 fp32 累积占 $4 B_M B_N$ 字节，A5 的 256 KB L0C 装得下 256×256 块（256 KB），A2 的 128 KB 只能到 128×256（7.4.4 细算）；
+3. **L2 是"隐形复用层"**：不同核读到同一块数据时可能命中 L2 而不必真跑 HBM——实测访存量常比理论账本好看，核间调度顺序能主动利用这一点（7.4.4）。注意 A5 的 L2 反而比 910B2"变小"（192→128 MB），换来的是 128 B 扇区粒度与按 Way 锁定，随机访存效率更高。
 
-昇腾侧同构：UB/L1 是核内案板，L2 全片共享，HBM 是仓库；各级容量随芯片版本不同，留给第五章展开，本章分析一律用"案板几百 KB、仓库几十 GB、带宽差一个量级"的数量级。
+GPU 对照：NVIDIA 把案板统一为每 SM 的 Shared Memory（A100 约 164 KB 可用）+ 寄存器堆，没有 L0/L1 这层显式分工；**昇腾把矩阵通路（L1→L0→L0C）和向量通路（UB）拆开，各自容量独立核算**——这是两生态 Tiling 决策最大的结构差异。各级延迟昇腾未公开细粒度数值，本章一律用"近/远"定性，不编造周期数。
 
 #### 7.2.2 算术强度与 Roofline：一张图判断瓶颈
 
@@ -4891,35 +4904,46 @@ $$
 P \le \min\bigl(\underbrace{P_{\text{peak}}}_{\text{算力屋顶}},\ \underbrace{AI \times BW}_{\text{带宽斜坡}}\bigr)
 $$
 
-两条线的交点叫**脊点（ridge point）**：
+两条线的交点叫**脊点（ridge point）** $AI^{*} = P_{\text{peak}} / BW$ 。把三代芯片的 fp16 口径代进去：
 
-$$
-AI^{*} = \frac{P_{\text{peak}}}{BW} \qquad \text{A100：} \frac{312\ \text{TFLOPS}}{2\ \text{TB/s}} = 156\ \text{FLOP/B}
-$$
+| 硬件 | $P_{\text{peak}}$ （fp16） | BW | 脊点 $AI^{*}$ |
+|---|---|---|---|
+| A2 · 910B2 | 353 TFLOPS | 1.6 TB/s | ≈221 FLOP/B |
+| A3 · 910C | ~780 TFLOPS | 3.2 TB/s | ≈244 FLOP/B |
+| A5 · 950PR | 432 TFLOPS | 1.6 TB/s | ≈270 FLOP/B |
+| A5 · 950DT | 486 TFLOPS | 4 TB/s | **≈122 FLOP/B** |
+| A5 · 950DT（FP8） | 973 TFLOPS | 4 TB/s | ≈243 FLOP/B |
+| A5 · 950DT（MXFP4） | 1946 TFLOPS | 4 TB/s | ≈487 FLOP/B |
+| GPU 对照 · A100 | 312 TFLOPS | 2 TB/s | ≈156 FLOP/B |
 
-- $AI < AI^{*}$ ：落在带宽斜坡上，**访存受限（memory-bound）**——性能 $= AI \times BW$ ，想快就得提高 AI（少搬数据）或换更大带宽的硬件；
-- $AI > AI^{*}$ ：顶到算力屋顶，**计算受限（compute-bound）**——性能 $\approx P_{\text{peak}}$ ，想快就得提高算力利用率（喂饱 Tensor Core）或换更强算力。
+*表7.2.2-1 各硬件脊点：950DT 带宽涨得比算力快，fp16 脊点反而比 A2 低；低精度屋顶抬高后脊点随之上移*
 
-在双对数坐标里，这就是一条斜线接一条水平线，形似屋顶：
+- $AI < AI^{*}$ ：落在带宽斜坡上，**访存受限（memory-bound）**——性能 $= AI \times BW$ ，想快就得提高 AI（少搬数据）；
+- $AI > AI^{*}$ ：顶到算力屋顶，**计算受限（compute-bound）**——性能 $\approx P_{\text{peak}}$ ，想快就得喂饱 Cube 核。
 
-📈 [图7.2.2-1 Roofline 交互模型（交互附件）](resources/chapter7/chapter7.2-roofline_model.html)——拖动峰值算力、带宽、算术强度三个滑杆，观察脊点移动与受限类型切换；内置 A100/H100 预设和六个典型算子预设（自包含 HTML，双击离线打开）。
+📈 [图7.2.2-1 Roofline 交互模型（交互附件）](resources/chapter7/chapter7.2-roofline_model.html)——拖动峰值算力、带宽、算术强度三个滑杆，观察脊点移动与受限类型切换；内置 A2·910B2、A5·950PR/DT（含 FP8）预设与六个典型算子预设，NVIDIA 预设保留作对照（自包含 HTML，双击离线打开）。
 
-**Tiling 在 Roofline 图上的几何意义：把算子的点往右推（提高 AI），直到撞上脊点为止。** 再往右推没有收益——这就是"块不是越大越好"的第一性原理：AI 超过脊点后，瓶颈已换成算力，继续加大块只会牺牲并行度。
+两个值得记住的结构性结论：
+
+1. **950DT 的 fp16 脊点（122）比 A2（221）低**——带宽翻了 2.5 倍而算力只涨 38%，更多算子会落到计算受限侧。同一个 kernel 从 A2 迁到 A5，瓶颈类型可能翻转，块大小必须重算；
+2. **低精度把脊点抬高**（FP8 243、MXFP4 487）——量化省了搬运，却把算子重新推回访存受限侧，这正是第六章"量化与 Tiling 互相成就"的 Roofline 解释（7.8.4 展开）。
+
+**Tiling 在 Roofline 图上的几何意义：把算子的点往右推（提高 AI），直到撞上脊点为止。** 再往右推没有收益——这就是"块不是越大越好"的第一性原理。
 
 #### 7.2.3 典型算子的 AI：GEMM 与 Decode Attention 站在屋顶两侧
 
-用 fp16 口径手算几个大模型核心算子的 AI（与交互附件的预设一致）：
+手算几个大模型核心算子的 AI（逐元素/Softmax 按 fp32 口径、GEMM/Attention 按 fp16 口径，与交互附件的预设一致）：
 
-| 算子 | 计算量 | 显存流量 | AI（FLOP/B） | 受限类型（A100， $AI^{*}=156$ ） |
+| 算子 | 计算量 | 显存流量 | AI（FLOP/B） | 受限类型（A2 脊点 221 / A5DT 脊点 122） |
 |---|---|---|---|---|
 | 逐元素加法 $c=a+b$ | $N$ | $12N$ B（读 2 写 1） | $\approx 0.083$ | 深度访存受限 |
 | Softmax（按行） | $\approx 5N$ | $4N$ B（读 1 写 1） | $\approx 1.25$ | 深度访存受限 |
 | Decode Attention（MHA，GEMV） | $\approx 2 S d$ /头 | $\approx 2 S d \times 2$ B | $\approx 1$ | 深度访存受限 |
 | Decode Attention（GQA，8 个 Q 头共享 1 个 KV 头） | 同上 ×8 | KV 只读一份 | $\approx 8$ | 仍访存受限，但好 8 倍 |
-| 分块 GEMM（ $B_M=B_N=128$ ） | $2MNK$ | 见 7.4.3 | $\approx 64$ | 访存受限，接近脊点 |
-| 大方阵 GEMM（4096³，理想复用） | $2 \times 4096^3$ | $3 \times 4096^2 \times 2$ B | $\approx 1365$ | 计算受限 |
+| 分块 GEMM（ $B_M=B_N=128$ ） | $2MNK$ | 见 7.4.3 | $\approx 64$ | 两代均访存受限 |
+| 大方阵 GEMM（4096³，理想复用） | $2 \times 4096^3$ | $3 \times 4096^2 \times 2$ B | $\approx 1365$ | 两代均计算受限 |
 
-*表7.2.3-1 六个典型算子的算术强度：同一张卡上，逐元素算子和大方阵 GEMM 的瓶颈完全不同*
+*表7.2.3-1 六个典型算子的算术强度：AI 是算子自身的属性，受限类型才随硬件脊点变化*
 
 三个值得记住的结论：
 
@@ -4927,117 +4951,172 @@ $$
 2. **GEMM 的 AI 不是常数，是块大小的函数**：朴素实现 AI≈0.5，分块后能推到 64 甚至更高——GEMM 是"Tiling 能改变命运"的典型，7.4 节整节讲它；
 3. **Decode Attention 的 AI≈1 是 LLM 推理慢的数学根源**：每生成一个 token 要把全部权重和 KV Cache 读一遍，却只做一次矩阵-向量乘。第六章说"量化让生成快 4 倍"，本质就是把这条账的 Bytes 除以 4。
 
-**K 维分块的意义**（大纲里的经典问题）：GEMM 中 $K$ 是归约维，输出块的每个元素都要沿 $K$ 累加。沿 $K$ 切成小段循环，才能让"一次搬入的 A/B 小块被输出块的 $B_M B_N$ 个元素反复使用"——**K 循环是复用发生的场所**，7.4.2 展开。
+**K 维分块的意义**：GEMM 中 $K$ 是归约维，输出块的每个元素都要沿 $K$ 累加。沿 $K$ 切成小段循环，才能让"一次搬入的 A/B 小块被输出块的 $B_M B_N$ 个元素反复使用"——**K 循环是复用发生的场所**，7.4.2 展开。
 
-#### 7.2.4 并行与访存效率：块要够分，搬要合并
+#### 7.2.4 并行与访存效率：块要够分，搬要成段
 
 四约束里的"并行度"和"访存量"还有两个工程细节，先在这里立规矩：
 
 **(1) 块数 ≥ 核数，且尽量整除**
 
-A100 有 108 个 SM。若 GEMM 只切出 64 个输出块，44 个 SM 从头到尾空转；若切出 1024 块，则 $1024 / 108 = 9.48$ 轮——**最后一轮只有 52 个 SM 干活**，这叫**尾波（tail wave）**。块数最好是核数的整数倍附近，或干脆多到让尾波占比可忽略。这与 7.1.3 的"尾块"是两个概念：尾块是**数据**装不满一个块，尾波是**块**装不满一轮核。
+A5·950DT 满配有 36 个 Cube 核（AIC）+ 72 个 Vector 核（AIV），A2·910B2 是 24 AIC + 48 AIV。GEMM 走 Cube 核：若只切出 16 个输出块，950DT 上 20 个 AIC 从头到尾空转；若切出 1024 块，则 $1024 / 36 = 28.4$ 轮——**最后一轮只有 16 个核干活**，这叫**尾波（tail wave）**。块数最好是核数的整数倍附近，或干脆多到让尾波占比可忽略。这与 7.1.3 的"尾块"是两个概念：尾块是**数据**装不满一个块，尾波是**块**装不满一轮核。Vector 算子同理，只是核数换成 AIV 数（host 侧 `SetBlockDim` 决定实际启用多少核）。
 
-**(2) 合并访存（coalescing）与向量化加载**
+**(2) 搬运成段：DataBlock 对齐与向量化**
 
-GPU 的一个 warp（32 线程）同时发加载时，若 32 个地址恰好落在连续的 128 B 内，硬件合并成**一次**事务；若地址散乱（比如按列读行优先矩阵），拆成最多 32 次事务，有效带宽掉到 1/32。两条工程规则：
+昇腾的搬运引擎（MTE2：HBM→L1/UB，MTE1：L1→L0，MTE3：写回）按段工作，两条工程规则：
 
-- **让相邻线程读相邻地址**：tile 的最内维必须对应内存连续维（7.7 节 Layout 的全部意义就在这条）；
-- **向量化加载**：单线程一次取 `float4`（16 B）而非 4 次 `float`，指令数减 4 倍；昇腾侧对应"按 DataBlock 32 B 对齐搬运"。
+- **地址与长度按 DataBlock 32 B 对齐**：`DataCopy` 要求源/目的/长度三对齐，一次搬整段；不对齐的尾块走 `DataCopyPad`（7.3.3）；
+- **让单次搬运尽量大、尽量连续**：A5 的 Vector 核每拍可读写 512 B（双发射 128 lane × fp16 × 2），A2 是 256 B/拍——tile 的最内维必须对应内存连续维，才能一拍吃满（7.7 节 Layout 的全部意义就在这条）。
 
-这两条不改变 AI 的分子分母，但决定**实测带宽能吃到理论带宽的几成**。账本算得再好，访存不合并也白搭。
+GPU 对照：NVIDIA 靠 warp 内 32 线程地址合并（coalescing）成 128 B 事务，散乱访存有效带宽掉到 1/32；昇腾没有 warp 概念，**合并的责任在 `DataCopy` 的段粒度与 Layout 设计上**，而不是线程地址模式上。
 
-### 7.3 第一个 Tiled Kernel：tile 级思维
+这两条不改变 AI 的分子分母，但决定**实测带宽能吃到理论带宽的几成**。账本算得再好，搬运不成段也白搭。
 
-本节用最小的算子——向量加法——把"分块 + 掩码 + 块大小"完整走一遍。选 Triton 作载体：它把线程级细节（warp 划分、`__syncthreads()`、Tensor Core 指令）全部藏进编译器，让你**只思考 tile**，这正是学习 Tiling 的正确抽象层级（工具选型见 7.9）。Triton 编程模型已在第三章 3.3 系统讲过，这里只取所需。
+### 7.3 第一个 Tiled Kernel：AscendC 的三段流水
 
-#### 7.3.1 从线程到 tile：Program ID 与块空间映射
+本节用最小的算子——向量加法——把"tiling 函数 + 分块搬运 + 尾块"完整走一遍。载体是 **AscendC**：昇腾算子的原生编程语言，host 侧写 tiling 决策、device 侧写核内流水。第三章的 Triton 在末尾作对照——两者思想同构，但昇腾把 Buffer 与同步交到你手里，控制力更强。
 
-CUDA 的思维是"我是第几号线程，我算哪个元素"；Triton 的思维是"**我是第几号程序（program），我负责哪一块**"：
+#### 7.3.1 核内思维：一个核负责一段，一段切成多 tile
 
-```python
-pid = tl.program_id(axis=0)              # 我是第几块
-offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # 我负责的元素下标
+AscendC 的并行模型是 **SPMD**：host 侧 `SetBlockDim(blockDim)` 启用若干个核，每个核跑同一份 kernel，用 `GetBlockIdx()` 知道自己是谁，负责数据的一段。核内再把这一段切成若干 tile，按 **CopyIn → Compute → CopyOut** 三段流水处理：
+
+```mermaid
+flowchart LR
+    GM["HBM<br/>GlobalTensor"] -->|"MTE2 · DataCopy"| UB["UB<br/>LocalTensor（TQue 管理）"]
+    UB -->|"Vector 指令<br/>Add"| UB2["UB 输出缓冲"]
+    UB2 -->|"MTE3 · DataCopy"| GM2["HBM 输出"]
 ```
 
-启动时指定 `grid = (ceil(N / BLOCK_SIZE),)` ，即"块空间"有多大。一个 program 内部，编译器自动把 `BLOCK_SIZE` 个元素摊给线程、自动向量化、自动同步。**你写的每一行代码都在操作整个 tile（一个向量），而不是单个元素**——这就是 tile 级抽象。
+*图7.3.1-1 向量算子三段流水：搬入、计算、搬出各走各的引擎，TQue 在它们之间传递张量并做同步*
 
-映射关系一句话：**块空间的一维坐标 → 数据空间的一段连续下标**。GEMM 会升到二维（`pid_m, pid_n` → 输出块坐标，7.4.2），Attention 再加头维和 batch 维（7.6），但思想不变。
+与 Triton 的"一个 program 操作一个 tile"对照：AscendC 的"一个核操作一段、段内循环多 tile"多了一层**核间切分**（host 决定）与**核内切块**（tiling 决定）的显式区分——四约束里的"并行度"在 host 侧就要算好。
 
-#### 7.3.2 最小内核：带掩码的分块向量加法
+#### 7.3.2 最小内核：host tiling 函数 + 核内流水
 
-```python
-import torch, triton
-import triton.language as tl
+**(1) host 侧：tiling 函数把 shape 变成块参数**
 
-@triton.jit
-def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < n_elements                    # 尾块保护：越界位置不读不写
-    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
-    y = tl.load(y_ptr + offs, mask=mask, other=0.0)
-    tl.store(out_ptr + offs, x + y, mask=mask)
+```cpp
+// 块参数结构体：host 算好，device 取用
+BEGIN_TILING_DATA_DEF(AddTilingData)
+  TILING_DATA_FIELD_DEF(uint32_t, blockLength);  // 每核分到的数据长度
+  TILING_DATA_FIELD_DEF(uint32_t, tileNum);      // 每核的主块个数
+  TILING_DATA_FIELD_DEF(uint32_t, tileLength);   // 主块长度（32B 对齐）
+  TILING_DATA_FIELD_DEF(uint32_t, tailLength);   // 尾块长度
+END_TILING_DATA_DEF
+REGISTER_TILING_DATA_CLASS(AddCustom, AddTilingData)
 
-def add(x: torch.Tensor, y: torch.Tensor):
-    out = torch.empty_like(x)
-    n = x.numel()
-    BLOCK_SIZE = 1024
-    grid = (triton.cdiv(n, BLOCK_SIZE),)        # ceil 除法：主块 + 尾块
-    add_kernel[grid](x, y, out, n, BLOCK_SIZE=BLOCK_SIZE)
-    return out
+// tiling 函数核心逻辑（context 为算子编译期上下文）
+uint32_t blockDim = 8;                          // 启用 8 个 Vector 核
+uint32_t blockLength = (totalLength + blockDim - 1) / blockDim;
+uint32_t tileLength = 8192;                     // 主块：8192 × 2B = 16KB，32B 对齐
+auto tiling = context->GetTilingData<AddTilingData>();
+tiling->set_blockLength(blockLength);
+tiling->set_tileNum(blockLength / tileLength);
+tiling->set_tileLength(tileLength);
+tiling->set_tailLength(blockLength % tileLength);
+context->SetBlockDim(blockDim);
+```
+
+**(2) device 侧：TPipe/TQue 管理的三段流水**
+
+```cpp
+constexpr uint32_t BUFFER_NUM = 2;              // 双缓冲：搬第 i+1 块时算第 i 块
+
+__global__ __aicore__ void add_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z,
+                                      GM_ADDR workspace, GM_ADDR tiling) {
+  GET_TILING_DATA(tilingData, tiling);
+  TPipe pipe;
+  TQue<QuePosition::VECIN, BUFFER_NUM> queueX, queueY;
+  TQue<QuePosition::VECOUT, BUFFER_NUM> queueZ;
+  GlobalTensor<half> xGm, yGm, zGm;
+  xGm.SetGlobalBuffer((__gm__ half*)x + GetBlockIdx() * tilingData->get_blockLength(),
+                      tilingData->get_blockLength());   // yGm/zGm 同理
+  pipe.InitBuffer(queueX, BUFFER_NUM, tilingData->get_tileLength() * sizeof(half));
+  // queueY/queueZ 同理
+
+  for (uint32_t i = 0; i < tilingData->get_tileNum(); i++) {
+    uint32_t len = tilingData->get_tileLength();
+    // ① CopyIn：HBM → UB
+    LocalTensor<half> xLocal = queueX.AllocTensor<half>();
+    DataCopy(xLocal, xGm[i * len], len);
+    queueX.EnQue(xLocal);                       // y 同理入队
+    // ② Compute：UB 内逐元素加
+    xLocal = queueX.DeQue<half>();
+    LocalTensor<half> yLocal = queueY.DeQue<half>();
+    LocalTensor<half> zLocal = queueZ.AllocTensor<half>();
+    Add(zLocal, xLocal, yLocal, len);
+    queueZ.EnQue(zLocal);
+    queueX.FreeTensor(xLocal); queueY.FreeTensor(yLocal);
+    // ③ CopyOut：UB → HBM
+    zLocal = queueZ.DeQue<half>();
+    DataCopy(zGm[i * len], zLocal, len);
+    queueZ.FreeTensor(zLocal);
+  }
+  // 尾块：len 换成 tailLength 再走一遍（对齐处理见 7.3.3）
+}
 ```
 
 对照四约束账本读这段代码：
 
 - **计算量**： $N$ 次加法，固定；
-- **访存量**： $12N$ 字节（fp32 读 2 写 1），固定——逐元素算子没有复用空间，AI≈0.083，**深度访存受限**，所以它的优化上限就是打满带宽；
-- **片上容量**：一个 program 同时持有 x、y、out 三个 `BLOCK_SIZE` 长的向量（住寄存器），块越大寄存器压力越大；
-- **并行度**： `grid` 个 program 分给 SM，N=10 亿时块数近百万，尾波可忽略。
+- **访存量**： $12N$ 字节（fp32 读 2 写 1；fp16 口径为 $6N$ ），固定——逐元素算子没有复用空间，**深度访存受限**，优化上限就是打满带宽；
+- **片上容量**：三个队列 × 双缓冲 × tileLength × 2 B ≤ UB。tileLength=8192 时占 $3 \times 2 \times 16\text{KB} = 96\text{KB}$ ，A2 的 192 KB 与 A5 的 248 KB 都装得下；
+- **并行度**： `blockDim=8` 个核各分一段，段内 `tileNum` 个主块 + 1 个尾块。
 
-**BLOCK_SIZE 怎么选？** 太小（如 64）：program 数爆炸，调度开销占比上升，且单条加载指令搬不满事务粒度；太大（如 16384）：寄存器装不下，编译器把数据溢出到显存（spill），反而更慢。经验起点 1024，再按 7.8 的方法实测微调。对这种纯访存算子，块大小在合理区间内性能差异不大——**真正对块大小敏感的是有复用的 GEMM**，那是 7.4 的主场。
+**tileLength 怎么选？** 太小：搬运段碎、MTE 效率低、循环开销占比上升；太大：UB 装不下或挤掉双缓冲。经验起点是"UB 容量 ÷（队列数 × 缓冲份数 × 元素字节）"再向下取 32 B 对齐的整数——A5 上约 21000 个 fp16 元素是理论上限，取 8192 留足余量。对纯访存算子，合理区间内性能差异不大——**真正对块大小敏感的是有复用的 GEMM**，那是 7.4 的主场。
 
-#### 7.3.3 掩码与尾块：正确性先于性能
+#### 7.3.3 尾块与对齐：正确性先于性能
 
-$N = 10$ 、`BLOCK_SIZE = 4` 时 `grid = 3`，最后一个 program 的 `offs = [8, 9, 10, 11]`——后两个下标越界。若不处理：
+$N = 10$ 、块长 4 时最后一个核的最后一块只有 2 个有效元素。昇腾侧的两道坎：
 
-- 越界**读**：拿到垃圾值（甚至非法地址直接崩溃）；
-- 越界**写**：踩坏别的张量的内存，产生"偶尔错、查不出"的幽灵 bug。
+1. **越界**：尾块长度不足时，`DataCopy` 不能照主块长度搬——按实际 `tailLength` 搬，写回也只写有效范围；
+2. **对齐**：`DataCopy` 要求 32 B 对齐，`tailLength` 不是 16（fp16）的整数倍时直接搬会报错或踩内存。两条路：
+   - **`DataCopyPad`**：硬件补垫搬运，自动处理非对齐边界（多搬的补垫数据不参与计算）；
+   - **向上对齐 + 掩码**：把尾块补到对齐长度搬入，计算后用掩码只写回有效元素。
 
-掩码三件套是 Triton 尾块处理的标准姿势：
+**归约算子的补垫值有讲究**：加法补 0 无害；求 max 时补垫位置必须填 $-\infty$ ，否则垃圾值可能成为最大值；求和填 0。这条规则在 7.5 的 Softmax 和 7.6 的 Attention 里反复出现。
 
-1. `mask = offs < n` ：逐元素布尔向量，标记谁有效；
-2. `tl.load(..., mask=mask, other=0.0)` ：越界位置不访问内存，填 `other` 值；
-3. `tl.store(..., mask=mask)` ：越界位置不写。
-
-**`other` 的取值有讲究**：加法填 0 无害；但归约算子要小心——求 max 时越界位置必须填 $-\infty$ （`other=float('-inf')`），否则垃圾值可能成为最大值；求和填 0。这条规则在 7.5 的 Softmax 和 7.6 的 Attention 里反复出现。
-
-正确性验证永远跟 PyTorch 参考实现对数：
+正确性验证永远跟 PyTorch 参考实现对数（torch_npu 或 CPU 参照）：
 
 ```python
-x = torch.randn(10, device='cuda'); y = torch.randn(10, device='cuda')
-assert torch.allclose(add(x, y), x + y, atol=1e-6)   # N=10 专门触发尾块
+x = torch.randn(10, device='npu'); y = torch.randn(10, device='npu')
+assert torch.allclose(add_custom(x, y), x + y, atol=1e-3)   # N=10 专门触发尾块
 ```
 
 **测试 shape 要故意选不整除的数**（10、1000、4097），整除 shape 测不出尾块 bug。这是所有 tiled kernel 的第一条军规。
 
+**GPU 对照**：Triton 用逐元素布尔掩码统一解决越界与对齐（`mask = offs < n` ，`tl.load(..., other=0.0)` ），编译器自动处理事务粒度；昇腾把对齐约束显式暴露给开发者——**约束更硬，但主块路径也因此更干净**（无掩码分支）。
+
 #### 7.3.4 块大小与片上压力：先建立直觉，不陷入细节
 
-一个 program 的 tile 数据住在寄存器里。以 fp32 向量加法为例，`BLOCK_SIZE = 1024` 时 x、y、out 共约 12 KB，摊到编译出的线程上每人几十个寄存器—— comfortably 装下。若块开到 8192，人均寄存器逼近上限（每线程 255 个），编译器要么降低 occupancy（每 SM 同时驻留的 program 变少，掩盖延迟的能力变弱），要么 spill 到显存。
+一个 tile 的数据住在 UB 里，`TQue` 的 `BUFFER_NUM` 决定同时驻留几份。两条直觉足够支撑到 7.4：
 
-这里先建立两条直觉，足够支撑到 7.4：
+1. **块大小 ↔ 片上占用是线性账**：tile 元素数 × 每元素字节 × 队列数 × 缓冲份数 ≤ UB 容量；
+2. **双缓冲是"容量换重叠"**：两份缓冲让 MTE 搬运与 Vector 计算并行，掩盖搬运延迟；UB 紧张时先砍缓冲份数，再砍块大小。
 
-1. **块大小 ↔ 片上占用是线性账**：tile 元素数 × 每元素字节 × 同时驻留的 tile 份数 ≤ 案板容量；
-2. **occupancy 不是越高越好，但太低一定不好**：驻留的 program 多，一个等数据时另一个可以算，搬运延迟被"藏"住。
+本节刻意**不碰** Cube 核的 `Mmad`/`Fixpipe`、不讨论 UB bank conflict——它们是把 GEMM 推向算力屋顶的进阶武器（7.4.5 与 CANN 最佳实践），在"tiling 函数 + 三段流水 + 尾块正确性"建立之前引入只会添乱。
 
-本节刻意**不碰** Tensor Core、不手写 `__syncthreads()`、不讨论 warp shuffle——它们是把 GEMM 推向算力屋顶的进阶武器（7.4.5 与第三章 3.9），在"tile 映射 + 掩码正确性"建立之前引入只会添乱。
+**Triton 对照版**（同一算子的 GPU 写法，体会抽象差异；详解见第三章 3.4.1）：
+
+```python
+@triton.jit
+def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n                              # 掩码统一处理尾块
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    y = tl.load(y_ptr + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, x + y, mask=mask)
+# grid = (ceil(n / BLOCK),)：核间切分藏在启动参数里，Buffer/同步全由编译器管理
+```
 
 ### 7.4 分块 GEMM：Tiling 的核心矛盾
 
-矩阵乘法 $C = AB$ （ $A \in \mathbb{R}^{M \times K}$ ， $B \in \mathbb{R}^{K \times N}$ ）是大模型里占比最高的算子：QKV 投影、FFN 两层、lm_head 全是它。它也是**复用空间最大、对块大小最敏感**的算子——Tiling 的全部核心矛盾（访存量 vs 容量 vs 并行度）在它身上体现得最充分。
+矩阵乘法 $C = AB$ （ $A \in \mathbb{R}^{M \times K}$ ， $B \in \mathbb{R}^{K \times N}$ ）是大模型里占比最高的算子：QKV 投影、FFN 两层、lm_head 全是它。在昇腾上它由 **Cube 核**承担，基本算块是 16×16×16 的 PE 阵列（每拍 4096 次 fp16 乘加，三代未变）。GEMM 也是**复用空间最大、对块大小最敏感**的算子——Tiling 的全部核心矛盾（访存量 vs 容量 vs 并行度）在它身上体现得最充分。
 
 #### 7.4.1 朴素实现的访存账：每个输出元素都跑一趟仓库
 
-最朴素的 kernel：一个线程算一个 $C[i,j]$ ，为此读 A 的第 $i$ 行（K 个数）和 B 的第 $j$ 列（K 个数）：
+最朴素的做法：算一个 $C[i,j]$ 就完整读 A 的第 $i$ 行（K 个数）和 B 的第 $j$ 列（K 个数）：
 
 $$
 C[i,j] = \sum_{k=0}^{K-1} A[i,k]\, B[k,j]
@@ -5045,69 +5124,64 @@ $$
 
 每个输出元素搬 $2K$ 个元素，总流量 $2MNK \times 2\text{B}$ （fp16），而计算量只有 $2MNK$ 次——**AI = 0.5 FLOP/B**，比逐元素加法好不了多少。代入 $M=N=K=4096$ ：
 
-| 账目 | 数值 | 耗时（A100） |
-|---|---|---|
-| 计算量 $2 \times 4096^3$ | 137.4 GFLOP | 137.4G / 312T ≈ **0.44 ms** |
-| 朴素访存量 $2 \times 4096^3 \times 2\text{B}$ | 274.9 GB | 274.9G / 2T ≈ **137 ms** |
+| 账目 | 数值 | A5·950DT 耗时 | A2·910B2 耗时 |
+|---|---|---|---|
+| 计算量 $2 \times 4096^3$ | 137.4 GFLOP | /486T ≈ **0.28 ms** | /353T ≈ **0.39 ms** |
+| 朴素访存量 $2 \times 4096^3 \times 2\text{B}$ | 274.9 GB | /4T ≈ **68.7 ms** | /1.6T ≈ **171.8 ms** |
 
-*表7.4.1-1 朴素 GEMM 的两笔账：搬运时间是计算时间的 300 倍，算力利用率不到 0.4%*
+*表7.4.1-1 朴素 GEMM 的两笔账：搬运时间是计算时间的 200 多倍，Cube 核利用率不到 0.5%*
 
 同一行 A 数据被同一行的 4096 个输出元素各读了一遍，同一列 B 数据被同一列的 4096 个输出元素各读了一遍——**数据明明可以复用，却跑了 4096 趟仓库**。Tiling 要做的就是把"顺路能复用的计算"圈进同一个块里。
 
 #### 7.4.2 M/N/K 三维分块与 K 循环累加
 
-把输出 C 切成 $B_M \times B_N$ 的块，每个 program 负责一块；A、B 沿 K 切成 $B_K$ 厚的小片，**循环搬入、循环累加**：
+把输出 C 切成 $B_M \times B_N$ 的块，每个 Cube 核负责一块；A、B 沿 K 切成 $B_K$ 厚的小片，**循环搬入、循环累加**：
 
 $$
 C_{ij} = \sum_{k=0}^{K/B_K - 1} A_{ik}\, B_{kj} \qquad \text{（块矩阵乘法，数学上精确）}
 $$
 
+昇腾的矩阵数据通路是显式分级的：HBM →（MTE2）→ L1 →（MTE1，按 NZ 分形）→ L0A/L0B →（`Mmad`）→ L0C 累加 →（`Fixpipe`）→ HBM：
+
 ```mermaid
 flowchart LR
     subgraph HBM
-        A["A 的条带<br/>B_M × B_K"]
-        B["B 的条带<br/>B_K × B_N"]
+        A["A 条带 B_M×B_K"]
+        B["B 条带 B_K×B_N"]
     end
-    subgraph SMEM["案板（Shared Memory）"]
-        At["A tile"]
-        Bt["B tile"]
-    end
-    ACC["累加器 C tile<br/>B_M × B_N（fp32，住寄存器）"]
-    A -->|"第 k 段"| At
-    B -->|"第 k 段"| Bt
-    At -->|"tl.dot"| ACC
-    Bt -->|"tl.dot"| ACC
-    ACC -->|"K 循环结束后一次写回"| C["C 块写回 HBM"]
+    L1["L1 Buffer 512KB<br/>A/B 小片暂存（可双缓冲）"]
+    L0["L0A / L0B 各 64KB<br/>NZ 分形操作数"]
+    L0C["L0C 累加器<br/>B_M×B_N fp32 常驻"]
+    A -->|"MTE2"| L1
+    B -->|"MTE2"| L1
+    L1 -->|"MTE1 · LoadData"| L0
+    L0 -->|"Mmad 16×16×16"| L0C
+    L0C -->|"K 循环结束 · Fixpipe<br/>可随路量化/NZ→ND"| C["C 块写回 HBM"]
 ```
 
-*图7.4.2-1 分块 GEMM 的数据流：A/B 小块流水搬入，输出块常驻寄存器累加，最后才写回*
+*图7.4.2-1 Cube 分块 GEMM 的数据流：A/B 小片沿 L1→L0 流水搬入，输出块常驻 L0C 累加，最后才写回*
 
-Triton 骨架（完整教程版见第三章 3.4.3）：
+AscendC 骨架（伪代码，完整实现见 CANN Matmul 样例与高阶 API `Matmul`）：
 
-```python
-@triton.jit
-def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
-                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid_m, pid_n = tl.program_id(0), tl.program_id(1)   # 我负责哪个输出块
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # 累加器：fp32 保精度
-    for k in range(0, K, BLOCK_K):                      # K 循环：复用发生的场所
-        offs_k = k + tl.arange(0, BLOCK_K)
-        a = tl.load(a_ptr + offs_m[:, None] * K + offs_k[None, :],
-                    mask=(offs_m[:, None] < M) & (offs_k[None, :] < K), other=0.0)
-        b = tl.load(b_ptr + offs_k[:, None] * N + offs_n[None, :],
-                    mask=(offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0)
-        acc += tl.dot(a, b)                             # 编译器自动映射 Tensor Core
-    tl.store(c_ptr + offs_m[:, None] * N + offs_n[None, :], acc.to(tl.float16),
-             mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+```cpp
+// 每个 Cube 核负责一个 B_M×B_N 输出块
+for (uint32_t k = 0; k < K; k += baseK) {
+  DataCopy(aL1, aGm[blkM * baseM][k], ...);   // ① HBM → L1（MTE2）
+  DataCopy(bL1, bGm[k][blkN * baseN], ...);
+  LoadData(aL0A, aL1, { /* NZ 分形参数 */ });  // ② L1 → L0A（MTE1）
+  LoadData(bL0B, bL1, { /* NZ 分形参数 */ });  //    L1 → L0B
+  Mmad(cL0C, aL0A, bL0B, { baseM, baseN, baseK, /* fp32 累加 */ });  // ③ 16×16×16 基本块
+}
+Fixpipe(cGm[blkM * baseM][blkN * baseN], cL0C, { /* 可随路量化 */ });  // ④ 一次写回
 ```
 
 三个设计决策对应三个约束：
 
-- **输出块常驻寄存器**（output-stationary）：C 块只在最后写回一次，写回流量从"每段 K 都写"压到 $MN$ ；
+- **输出块常驻 L0C**（output-stationary）：C 块只在最后 `Fixpipe` 一次，写回流量压到 $MN$ ；A5 把 L0C 从 128 KB 扩到 256 KB，就是为了让更大的输出块常驻；
 - **K 循环内搬 A/B 小片**：每片 $B_M B_K + B_K B_N$ 个元素，被块内 $B_M B_N$ 个输出元素复用——**搬运量与块大小挂钩**，下一节算账；
-- **fp32 累加、fp16 存储**：累加误差随 K 增长，混合精度是精度与容量的折中（第六章 6.2 的浮点误差账）。
+- **fp32 累加、fp16 存储**：累加误差随 K 增长，L0C 用 fp32（整数路线用 INT32）保精度，写回时压回 fp16——A5 的 `Fixpipe` 支持**随路量化**（FP32/INT32 → BF16/FP16/FP8/INT8）与 NZ→ND 排布转换，后处理直接挂在写回通路上（7.8.3）。
+
+GPU 对照：Triton 把这条通路压缩成一句 `acc += tl.dot(a, b)` ——SMEM 暂存、寄存器累加、Tensor Core 映射全由编译器完成（第三章 3.4.3）。**昇腾显式管理每一级 Buffer，换来的是对流水与容量的精确控制**。
 
 #### 7.4.3 复用率公式：块大小如何决定访存量
 
@@ -5123,23 +5197,23 @@ $$
 AI = \frac{2MNK}{2\bigl(MKN/B_N + KNM/B_M\bigr)} = \frac{1}{\tfrac{1}{B_M} + \tfrac{1}{B_N}} = \frac{B_M B_N}{B_M + B_N}
 $$
 
-**AI 只由块的两个边长决定，与矩阵本身多大无关**：$B_M = B_N = 128$ 时 AI = 64 FLOP/B；朴素实现相当于 $B_M = B_N = 1$ ，AI = 0.5——和 7.4.1 的账完全对上。方块（ $B_M = B_N$ ）在给定面积下 AI 最高，这就是经典配置都取方块的原因。
+**AI 只由块的两个边长决定，与矩阵本身多大、在哪款芯片上跑都无关**： $B_M = B_N = 128$ 时 AI = 64 FLOP/B；朴素实现相当于 $B_M = B_N = 1$ ，AI = 0.5——和 7.4.1 的账完全对上。方块（ $B_M = B_N$ ）在给定面积下 AI 最高，这就是经典配置都取方块的原因。
 
-📈 [图7.4.3-1 GEMM 分块复用计算器（交互附件）](resources/chapter7/chapter7.4-gemm_tiling_reuse.html)——拖动 $B_M / B_N / B_K$ ，实时看四约束账本（流量节省、AI、SMEM 占用、寄存器压力、尾波）与 K 循环搬运复用动画；内置"经典 128/128/32"与"朴素 1/1/1"两个对照预设（自包含 HTML，双击离线打开）。
+📈 [图7.4.3-1 GEMM 分块复用计算器（交互附件）](resources/chapter7/chapter7.4-gemm_tiling_reuse.html)——拖动 $B_M / B_N / B_K$ ，实时看四约束账本（流量节省、AI、L1/L0C 占用、尾波）与 K 循环搬运复用动画；内置 A2·910B2 与 A5·950DT 硬件预设、fp16/fp8/mxfp4 精度选项，"经典 128/128/32"与"朴素 1/1/1"两个对照预设（自包含 HTML，双击离线打开）。
 
-把 $M=N=K=4096$ 、fp16、128/128/32、双缓冲、256 线程/块代入四约束账本：
+把 $M=N=K=4096$ 、fp16、128/128/32、双缓冲代入 **A5·950DT** 的四约束账本：
 
 | 约束 | 计算 | 结果 | 判定 |
 |---|---|---|---|
-| 计算量 | $2 \times 4096^3$ | 137.4 GFLOP → 0.44 ms | 基准 |
-| 访存量 | $2 \times (4096^2 \times 32) \times 2\text{B} \times 2 + 33.5\text{MB}$ | ≈2.18 GB → 1.09 ms，AI≈63 | 比朴素省 **126 倍**；仍访存受限（63 < 156） |
-| 片上容量 | SMEM：双缓冲 × $(128{\times}32 + 32{\times}128) \times 2\text{B}$ | 32 KB ≤ 164 KB | 装得下 |
-| 片上容量 | 累加器：$128 \times 128 \times 4\text{B}$ / 256 线程 | 64 寄存器/线程 ≤ 255 | 装得下 |
-| 并行度 | 输出块数 $(4096/128)^2 = 1024$ ，A100 108 SM | 9.48 轮，尾波 52/108 | 可接受 |
+| 计算量 | $2 \times 4096^3$ | 137.4 GFLOP → 0.28 ms | 基准 |
+| 访存量 | $2 \times (4096^2 \times 32) \times 2\text{B} \times 2 + 33.5\text{MB}$ | ≈2.18 GB → 0.55 ms，AI≈63 | 比朴素省 **126 倍**；仍访存受限（63 < 122） |
+| 片上容量 | L1：双缓冲 × $(128{\times}32 + 32{\times}128) \times 2\text{B}$ | 32 KB ≤ 512 KB | 装得下 |
+| 片上容量 | L0C 累加器： $128 \times 128 \times 4\text{B}$ | 64 KB ≤ 256 KB（A2 128 KB 也够） | 装得下 |
+| 并行度 | 输出块数 $(4096/128)^2 = 1024$ ，950DT 36 AIC | 28.4 轮，尾波 16/36 | 可接受 |
 
-*表7.4.3-1 经典配置 128/128/32 的四约束账本：访存仍是瓶颈，但已从"灾难"变成"可优化"*
+*表7.4.3-1 经典配置 128/128/32 在 A5·950DT 上的四约束账本：访存仍是瓶颈，但已从"灾难"变成"可优化"（A2 上同配置耗时约 1.36 ms，瓶颈判定相同）*
 
-注意 AI≈63 仍低于脊点 156——**这个配置下 GEMM 还是访存受限**。想继续往右推，可以加大块（256×128 → AI≈85），但 SMEM 与寄存器压力同步上涨；或者靠 L2 命中把"理论流量"再打折（下节）。工业 kernel 正是在这条钢丝上找平衡。
+注意 AI≈63 仍低于脊点 122——**这个配置下 GEMM 还是访存受限**。想继续往右推，可以加大块（256×128 → AI≈85，L0C 占 128 KB，A5 装得下、A2 刚好顶格），或靠 L2 命中把"理论流量"再打折（下节）。工业 kernel 正是在这条钢丝上找平衡。
 
 #### 7.4.4 块大小的三方权衡与 L2 调度
 
@@ -5147,41 +5221,43 @@ $$
 
 | 调大谁 | 好处 | 代价 |
 |---|---|---|
-| $B_M, B_N$ | AI 上升、HBM 流量下降、K 循环写回更少 | SMEM/寄存器占用上升 → occupancy 下降；输出块数减少 → 尾波加重 |
-| $B_K$ | 循环次数减少、单次搬运粒度大（利于合并访存） | SMEM 占用线性上升；对 AI 无直接贡献 |
+| $B_M, B_N$ | AI 上升、HBM 流量下降、Fixpipe 写回更少 | **L0C 占用上升**（ $4 B_M B_N$ 字节）；L1 暂存压力上升；输出块数减少 → 尾波加重 |
+| $B_K$ | 循环次数减少、单次搬运段更大（利于 MTE 效率） | L1/L0 占用线性上升；对 AI 无直接贡献 |
 | 块数（切小） | 并行度充足、负载均衡 | 复用率下降、流量上升 |
 
 *表7.4.4-1 块大小三方权衡：没有免费午餐，只有具体 shape 下的最优折中*
 
-**L2 是第四个隐藏玩家**。理论账本假设每次块读取都跑 HBM，但相邻输出块共享 A/B 条带——若调度让它们**时间上挨着执行**，第二次读取就命中 40 MB 的 L2。Triton 教程 03 的 `GROUP_SIZE_M` 分组调度（swizzle）就是干这个的：把"行优先遍历输出块"改成"按组蛇形遍历"，让同一 A 条带的块扎堆执行。实测大 GEMM 的 HBM 流量可再降 30–50%（详见第三章 3.4.3）。**账本给出下界，调度决定实测离下界多近。**
+**L0C 是昇腾侧最硬的容量天花板**：fp32 累加下，A5 的 256 KB 最多常驻 256×256 输出块，A2 的 128 KB 最多 128×256——**这直接框死了 $B_M B_N$ 的上限**，比 GPU 的寄存器账（每线程 255 个 fp32、累加器摊到线程）更直观。GPU 对照：Triton 里 128×128 fp32 累加器摊到 256 线程是每人 64 个寄存器，块开大先撞寄存器墙；昇腾先撞 L0C 墙。墙的位置不同，权衡的逻辑相同。
 
-#### 7.4.5 经典优化阶梯：从合并访存到 Tensor Core
+**L2 是第四个隐藏玩家**。理论账本假设每次块读取都跑 HBM，但相邻输出块共享 A/B 条带——若调度让它们**时间上挨着执行**，第二次读取就命中 L2。Triton 教程 03 的 `GROUP_SIZE_M` 分组调度（swizzle）是 GPU 侧的做法；昇腾侧对应 host 核对块到 `GetBlockIdx()` 的映射顺序设计，让共享条带的输出块扎堆执行。**账本给出下界，调度决定实测离下界多近。**
+
+#### 7.4.5 经典优化阶梯：从成段搬运到 Cube 满速
 
 块大小定好后，还有一串"把搬运和计算各自做快"的经典手段，按学习顺序排成阶梯：
 
-**(1) 向量化加载（Vectorized Load）**：单线程一次取 16 B（`float4`），指令数减 4 倍，配合合并访存吃满带宽。Triton 编译器在连续维自动做。
+**(1) 成段搬运与对齐**：`DataCopy` 地址/长度按 32 B 对齐、单次搬运尽量大，MTE 效率吃满；L1→L0 的 `LoadData` 按 NZ 分形一次到位，避免二次重排。
 
-**(2) 双缓冲（Double Buffering）**：案板上放两份 A/B tile，算第 k 段的同时预取第 k+1 段——**计算与搬运重叠**，把 HBM 延迟藏进计算时间。SMEM 占用翻倍（表7.4.3-1 的 32 KB 已含双缓冲），这是"容量换时间"的典型交易。昇腾 AscendC 里对应 `Queue` 的 ping-pong 机制，Triton 编译器自动流水。
+**(2) 双缓冲与流水重叠**：L1 里放两份 A/B 小片，`Mmad` 算第 k 段时 MTE2 预取第 k+1 段——**计算与搬运重叠**。AscendC 用 `TQue` 的 `BUFFER_NUM=2` 管理（7.3.2 已见），Cube 高阶 API 里对应 L1 双缓冲配置。L1 占用翻倍（表7.4.3-1 的 32 KB 已含双缓冲），这是"容量换时间"的典型交易。
 
-**(3) Warp 级数据交换**：Tensor Core 的 mma 指令对"哪个线程持有矩阵哪个元素"有固定布局要求，warp 内用 shuffle 指令重排数据比绕道 SMEM 快。Triton/Gluon 层面由编译器处理（第三章 3.9）。
+**(3) 分形与布局**：NZ 排布让 16×16 操作数块在 L0 里连续对齐，`LoadData`/`Mmad` 无需转置开销；7.7 节的 PA_NZ 是同一思想在存储侧的固化。
 
-**(4) Tensor Core**：一条指令算一个小矩阵块（如 16×8×16），吞吐是 CUDA Core 的数倍到数十倍。`tl.dot` 自动映射。**到这一步，优化目标从"少搬"切换成"喂饱"**——非 matmul 指令（rescale、掩码、类型转换）占比要压低，FlashAttention v2 的改进之一就是减少非 matmul FLOPs（第二章表2.5.6-1）。
+**(4) Cube 满速 + Fixpipe 后处理**：`Mmad` 喂满 16×16×16 阵列（fp16 每拍 4096 MAC），非矩阵乘工作（量化、激活、bias）尽量挂到 `Fixpipe` 随路或 Vector 核 epilogue，别占 Cube 的拍子。**到这一步，优化目标从"少搬"切换成"喂饱"**——FlashAttention v2 减少非 matmul FLOPs 的思路（第二章表2.5.6-1）在昇腾上同样适用。
 
-再往下（TMA 异步搬运、wgmma、持久化内核）属于 Hopper/Blackwell 的深水区，第三章 3.9 的 Gluon 与教程 09 已覆盖，本章不展开。**学习边界：先用 tile 级抽象把 (1)(2)(4) 的收益拿到手，(3) 以下交给编译器。**
+再往下（UB bank conflict 规避、A5 的 SIMD/SIMT 混合编程、手工 `Mmad` 流水）属于 CANN 最佳实践的深水区，本章不展开。**学习边界：先用高阶 API 把 (1)(2)(4) 的收益拿到手，(3) 以下交给库与编译器。**
 
 #### 7.4.6 尾块与不规则 Shape：真实大模型没有 4096 这么整齐
 
 真实 LLM 的 GEMM shape：hidden 4096 / 11008、词表 32000 / 151936、序列长度随用户输入任意——**几乎处处不整除**。三种工程处理：
 
-1. **掩码法**（Triton 主流）：主块尾块走同一 kernel，`mask` 保护越界读写（7.4.2 代码已含）。代价是尾块那批 program 做满额指令却只有部分有效，浪费一点算力；
-2. **填充法**（cuBLAS 风格）：把矩阵 pad 到对齐粒度再算，多算的部分丢弃。浪费显存和算力，但 kernel 内部无分支、最快；
-3. **主块 + 尾块分治**（AscendC 风格）：tiling 函数把 shape 拆成"主块数 × 主块长 + 尾块长"，kernel 内分别走无掩码快路径和掩码慢路径——**主块占绝大多数时，为它们去掉掩码分支值得**。
+1. **主块 + 尾块分治**（AscendC 主流）：tiling 函数把 shape 拆成"主块数 × 主块长 + 尾块长"，核内主块走无对齐顾虑的快路径、尾块走 `DataCopyPad` 或补垫慢路径——**主块占绝大多数时，为它们去掉边界处理值得**；
+2. **填充法**：把矩阵 pad 到对齐粒度再算，多算的部分丢弃。浪费显存和算力，但 kernel 内部无分支；
+3. **掩码法**（Triton 主流）：主块尾块走同一 kernel，逐元素 `mask` 保护越界读写。代价是尾块做满额指令却只有部分有效。
 
-还有一个特殊形态：**瘦长 GEMM**（M 很小、K 很大，如 Decode 时的 lm_head：M=batch、K=hidden、N=词表）。输出块数太少，并行度约束报警。解法是 **Split-K**：沿 K 维也切块分给不同核，各核算部分和，最后归约合并——注意这又是"沿归约轴分块"，合并步骤的正确性由 7.5 的框架保证。
+还有一个特殊形态：**瘦长 GEMM**（M 很小、K 很大，如 Decode 时的 lm_head：M=batch、K=hidden、N=词表）。输出块数太少，36 个 Cube 核喂不饱。解法是 **Split-K**：沿 K 维也切块分给不同核，各核算部分和，最后归约合并——注意这又是"沿归约轴分块"，合并步骤的正确性由 7.5 的框架保证。
 
 ### 7.5 Softmax 与归约：沿归约轴分块的正确性
 
-GEMM 的 K 循环能分块，是因为加法满足结合律、且中间结果可以累加。但有一类算子没那么听话：**归约（reduction）**——softmax、LayerNorm、max/sum。它们的输出依赖**整行/整列的全局统计量**，朴素切块会直接算错。本节把"归约怎么安全分块"讲透，它是 7.6 FlashAttention 的数学地基。
+GEMM 的 K 循环能分块，是因为加法满足结合律、且中间结果可以累加。但有一类算子没那么听话：**归约（reduction）**——softmax、LayerNorm、max/sum。它们的输出依赖**整行/整列的全局统计量**，朴素切块会直接算错。在昇腾上这类算子由 **Vector 核**承担（`ReduceMax`/`ReduceSum` 等指令），本节把"归约怎么安全分块"讲透，它是 7.6 FlashAttention 的数学地基。
 
 #### 7.5.1 为什么归约不能朴素分块
 
@@ -5197,9 +5273,9 @@ $$
 
 #### 7.5.2 两遍扫描与在线累积：从 safe softmax 到 Online Softmax
 
-**(1) 三遍 → 两遍（safe softmax）**：第一遍求 $m = \max_i x_i$ ，第二遍求 $\ell = \sum_i e^{x_i - m}$ ，第三遍输出 $e^{x_i - m}/\ell$ 。若整行能装进一个 tile，三遍都在片上完成，只需**一次读入一次写出**——这就是第三章教程 02 融合 Softmax 的做法：按行并行，每行一个 program，行内归约用 `tl.max` / `tl.sum`。
+**(1) 三遍 → 两遍（safe softmax）**：第一遍求 $m = \max_i x_i$ ，第二遍求 $\ell = \sum_i e^{x_i - m}$ ，第三遍输出 $e^{x_i - m}/\ell$ 。若整行能装进一个 UB tile，三遍都在片上完成，只需**一次读入一次写出**——这就是融合 Softmax 的做法：按行并行，每行一个核（或一个 tile），行内归约用 `ReduceMax`/`ReduceSum`。
 
-**(2) 行太长装不下？在线累积（Online Softmax）**：把行切成块依次读入，只维护两个运行统计量 $(m, \ell)$ ，每来一块就修正：
+**(2) 行太长装不下？在线累积（Online Softmax）**：把行切成块依次读入 UB，只维护两个运行统计量 $(m, \ell)$ ，每来一块就修正：
 
 $$
 \begin{aligned}
@@ -5218,60 +5294,67 @@ $$
 
 归约算子的 tile 策略由此定型，三条规则：
 
-1. **沿非归约轴并行，沿归约轴串行/在线**：Softmax 按行分 program（行间独立），行内沿列方向 tile 化归约；绝不让两个 program 各算半行再"简单拼接"；
-2. **行能装下就一行一块**：常见 hidden ≤ 8192，fp32 下 32 KB，一个 tile 装得下 → 两遍扫描、一次读写，访存最优（AI≈1.25 的算子只能靠融合再提）；
+1. **沿非归约轴并行，沿归约轴串行/在线**：Softmax 按行分给 Vector 核（行间独立），行内沿列方向 tile 化归约；绝不让两个核各算半行再"简单拼接"；
+2. **行能装下就一行一块**：常见 hidden ≤ 8192，fp32 下 32 KB，A2 的 192 KB UB 都装得下 → 两遍扫描、一次读写，访存最优（AI≈1.25 的算子只能靠融合再提）；
 3. **行装不下就两级归约**：先各块算局部统计量，再用 7.5.2 的合并公式把局部量拼成全局量——**合并公式就是"块间的 softmax"**。这个"局部统计 + 合并"模式会在 7.6.4 的 FlashDecoding（KV 维并行）和 Split-K GEMM 里再次出现。
 
 LayerNorm / RMSNorm 是同一模式的变体：全局统计量换成 mean / variance（RMSNorm 只有平方均值），合并公式换成对应的可加量（和、平方和），"先局部后合并"的骨架不变。**认出归约结构，就认出了它的 tile 策略。**
 
+GPU 对照：Triton 融合 Softmax（第三章 3.4.2）用 `tl.max`/`tl.sum` 在 program 内归约，思想完全一致——差异只在昇腾把归约指令与 UB 容量显式暴露，行并行度要按 AIV 核数（A5 满配 72）核算。
+
 ### 7.6 Attention Tiling：FlashAttention 与 KV Cache
 
-Attention 是大模型关键路径上**结构最复杂的算子**：两次 GEMM 夹一个归约（ $QK^\top$ → softmax → $\times V$ ），还带因果掩码和变长序列。第二章 2.5 已完整推导 FlashAttention 的算法与数值实例；本节站在 Tiling 方法论视角，回答三个工程问题：**块怎么切、掩码怎么省、Prefill 与 Decode 为什么策略不同**。
+Attention 是大模型关键路径上**结构最复杂的算子**：两次 GEMM 夹一个归约（ $QK^\top$ → softmax → $\times V$ ），还带因果掩码和变长序列。昇腾生态对应 ops-transformer 库的 FlashAttentionScore / FIA（`aclnnFusedInferAttentionScore`）/ IFA（`aclnnIncreFlashAttention`）等算子。第二章 2.5 已完整推导 FlashAttention 的算法与数值实例；本节站在 Tiling 方法论视角，回答三个工程问题：**块怎么切、掩码怎么省、Prefill 与 Decode 为什么策略不同**。
 
 #### 7.6.1 IO 感知出发点：不物化 N×N
 
-朴素注意力的瓶颈账（第二章 2.5.1）：中间矩阵 $S = QK^\top$ 与 $P = \text{softmax}(S)$ 都是 $N \times N$ ， $N=4096$ fp16 时各 32 MB，装不进案板，只能在 HBM 里写了读、读了写，总流量 $\Theta(Nd + N^2)$ 。
+朴素注意力的瓶颈账（第二章 2.5.1）：中间矩阵 $S = QK^\top$ 与 $P = \text{softmax}(S)$ 都是 $N \times N$ ， $N=4096$ fp16 时各 32 MB，装不进 UB/L1，只能在 HBM 里写了读、读了写，总流量 $\Theta(Nd + N^2)$ 。
 
 FlashAttention 的 IO 感知（IO-aware）原则：**算法设计的目标函数不是 FLOPs，而是 HBM 访问量**。手段就是本章的两大武器合体——
 
-- **分块**（7.4）：Q/K/V 切块， $S_{ij}$ 小块在案板上算完即丢，完整 $N \times N$ 从未落地；
+- **分块**（7.4）：Q/K/V 切块， $S_{ij}$ 小块在片上算完即丢，完整 $N \times N$ 从未落地；
 - **在线归约**（7.5）：softmax 沿 KV 块方向在线累积 $(m, \ell, O)$ ，绕过"必须看到整行"的限制。
 
-成果（第二章 2.5.6 的账本）：内存 $O(N^2) \to O(Nd)$ ；HBM 流量 $\Theta(Nd + N^2) \to \Theta(N^2 d^2 / M)$ （M 为案板容量，典型参数下 $d^2 \ll M$ ，故远小于 $N^2$ ）；FLOPs 不变。**省的是搬运，不是计算**——Roofline 图上就是把 Attention 的点往右推。
+成果（第二章 2.5.6 的账本）：内存 $O(N^2) \to O(Nd)$ ；HBM 流量 $\Theta(Nd + N^2) \to \Theta(N^2 d^2 / M)$ （M 为片上工作区容量，典型参数下 $d^2 \ll M$ ，故远小于 $N^2$ ）；FLOPs 不变。**省的是搬运，不是计算**——Roofline 图上就是把 Attention 的点往右推。
 
-#### 7.6.2 Q/K/V 分块迭代：v2 的循环结构
+#### 7.6.2 Q/K/V 分块迭代：Cube 与 Vector 的分工
 
-块大小由案板容量约束（第二章 2.5.3）：同时装下 Q 块、K 块、V 块、分数块，
+块大小由片上容量约束（第二章 2.5.3）：同时装下 Q 块、K 块、V 块、分数块，
 
 $$
 B_r d + B_c d + B_c d + B_r B_c \le M \;\;\overset{B_r = B_c = B}{\Longrightarrow}\;\; B \approx \frac{M}{4d}
 $$
 
-v2 的循环结构（也是今天 Triton 教程 06 与第三章 3.4.6 的结构）：
+代入 A5 的 UB（可用 248 KB）、 $d = 128$ ： $B \approx 248 \times 1024 / 512 \approx 496$ ，工程上取 128/256 这类对齐值。**A5 把 UB 从 192 KB 扩到 256 KB、L0C 从 128 KB 扩到 256 KB，正是给大 tile 的 FlashAttention 让路**（表7.2.1-1 读表要点）。
+
+v2 的循环结构（也是 Triton 教程 06 的结构）：
 
 ```text
-每个 program 负责一个 Q 块（外层，跨 program 并行）：
+每个核负责一个 Q 块（外层，跨核并行）：
   载入 Q_i，初始化 m = -inf, ℓ = 0, O = 0
   for j in KV 块（内层，串行在线累积）：
-    载入 K_j, V_j → 案板算 S_ij = Q_i K_jᵀ / √d
+    Cube 算 S_ij = Q_i K_jᵀ / √d
     （因果场景：按 7.6.3 跳块 / 掩码）
-    局部统计 → rescale 更新 m, ℓ, O
+    Vector 算局部统计 → rescale 更新 m, ℓ, O
+    Cube 算 O += P_ij V_j
   O_i /= ℓ_i，一次写回 HBM
 ```
 
 ```mermaid
 flowchart LR
-    Q["Q 块 i<br/>（常驻案板）"] --> S["S_ij 小块<br/>算完即丢"]
-    K["K/V 块 j<br/>（流水搬入）"] --> S
-    S --> M["局部 m̃, ℓ̃, P̃V_j"]
-    M --> R["rescale 合并<br/>运行状态 m, ℓ, O"]
-    R -->|"下一块 j+1"| S
-    R -->|"全部块完成"| O["O_i = O/ℓ<br/>一次写回"]
+    Q["Q 块 i（常驻片上）"] --> S["S_ij 小块<br/>Cube 算完即丢"]
+    K["K/V 块 j（流水搬入）"] --> S
+    S --> M["Vector：局部 m̃, ℓ̃<br/>rescale 合并 m, ℓ, O"]
+    M --> PV["Cube：O += P̃_ij V_j"]
+    PV -->|"下一块 j+1"| S
+    PV -->|"全部块完成"| O["O_i = O/ℓ<br/>一次写回"]
 ```
 
-*图7.6.2-1 FlashAttention v2 单个 program 的数据流：Q 块常驻、KV 块流水、三状态在线累积*
+*图7.6.2-1 FlashAttention v2 单个核的数据流：Q 块常驻、KV 块流水、三状态在线累积*
 
-**为什么外层是 Q 而不是 KV（v1→v2 的关键改动）**：外层 Q 意味着每个 program **独占**一个输出块，块间零同步，且 Q 块维也能并行——并行度约束直接受益。这又是 7.4.2 "输出块常驻"思想的复现：**让写回最少的那个张量当外层**。
+**昇腾的架构红利在这里兑现**：A2/A3 的一个 AI Core 内 Cube 与 Vector 混居，矩阵乘与 softmax 在同一核内交替；**A5 的分离架构（1 AIC + 2 AIV）让 Cube 专算 $QK^\top$/$PV$、Vector 专算 softmax/rescale，SSBuffer 直通道传递中间块**——两类指令流水独立推进，融合算子的重叠度更高。这是"硬件架构演进直接改写 Tiling 策略"的活例子。
+
+**为什么外层是 Q 而不是 KV（v1→v2 的关键改动）**：外层 Q 意味着每个核**独占**一个输出块，核间零同步，且 Q 块维也能并行——并行度约束直接受益。这又是 7.4.2 "输出块常驻"思想的复现：**让写回最少的那个张量当外层**。
 
 #### 7.6.3 因果掩码与分块跳过：Tiling 与模型语义结合
 
@@ -5288,10 +5371,10 @@ Q块3        [无掩]  [无掩]  [无掩]  [对角]
 块分三类，策略各不同：
 
 1. **全掩块（j > i）**：整块都在上三角，**直接跳过**——不搬 K/V、不算 GEMM。块粒度跳过省掉约一半的搬运与计算（ $N$ 越大越接近精确的 1/2）；
-2. **对角块（j = i）**：块内部分被掩，正常计算后在块内施加逐元素掩码（被掩位置填 $-\infty$ 再 softmax，正是 7.3.3 的 `other=-inf` 规则）；
+2. **对角块（j = i）**：块内部分被掩，正常计算后在块内施加逐元素掩码（被掩位置填 $-\infty$ 再 softmax，正是 7.3.3 的补垫值规则）；
 3. **无掩块（j < i）**：全速计算，连掩码指令都省了。
 
-**这是 Tiling 与模型语义结合的典范**：掩码不再是"算完再扔"的逐元素操作，而是上升为块调度决策。同样的思想推广到滑动窗口注意力（只算带状区域的块）、稀疏注意力（按稀疏模式跳块）——**模型结构里的一切"不用算"，都应该在块粒度兑现，而不是在元素粒度白算**。
+**这是 Tiling 与模型语义结合的典范**：掩码不再是"算完再扔"的逐元素操作，而是上升为块调度决策。同样的思想推广到滑动窗口注意力（只算带状区域的块）、稀疏注意力（按稀疏模式跳块，如昇腾 SMLA 算子）——**模型结构里的一切"不用算"，都应该在块粒度兑现，而不是在元素粒度白算**。
 
 #### 7.6.4 Decode 阶段与 KV Cache：另一套 tile 策略
 
@@ -5302,9 +5385,10 @@ Q块3        [无掩]  [无掩]  [无掩]  [对角]
 | Q 的形状 | $S \times d$ 矩阵 | **1 行**向量 |
 | 算子形态 | GEMM × 2 + softmax | **GEMV** × 2 + softmax |
 | AI | 高（可分块复用，计算受限倾向） | ≈1（MHA），深度访存受限 |
-| 瓶颈 | 算力利用率 | **KV Cache 读取带宽** |
+| 瓶颈 | Cube 利用率 | **KV Cache 读取带宽** |
 | tile 策略 | FlashAttention 式 Q/KV 双分块 + 跳块 | KV 维切块并行 + 合并（FlashDecoding） |
 | 并行来源 | batch × 头 × Q 块 | batch × 头 × **KV 块** |
+| 昇腾算子 | PromptFlashAttention / FIA | IncreFlashAttention（IFA）/ FIA |
 
 *表7.6.4-1 Prefill vs Decode：同一个算子，两个阶段的最优 tile 策略几乎相反*
 
@@ -5314,18 +5398,18 @@ Decode 的三个关键点：
 
 **(2) FlashDecoding：沿 KV 维分块并行**。长序列时 batch×头 的并行度不够喂饱核，就把 KV 序列也切成块分给不同核，各核算局部 $(m, \ell, O)$ ，最后用 7.5.2 的合并公式归约——**正是 7.5.3 "两级归约"模式的第三次登场**。
 
-**(3) Paged KV：页就是天然的 tile**。vLLM 的 PagedAttention（第二章 2.6.4）把 KV Cache 切成固定页长 Z（推荐 128）的物理页，用块表间接寻址。对 kernel 而言，**页边界就是 tile 边界**：每次按块表取一页 KV 进案板，页内连续、页间跳转。这带来一个新问题——页内数据按什么顺序摆，直接决定每页搬运的合并度。这就是下一节 Layout 的主题。
+**(3) Paged KV：页就是天然的 tile**。PagedAttention（第二章 2.6.4）把 KV Cache 切成固定页长 Z（昇腾推荐 128）的物理页，用块表间接寻址。对 kernel 而言，**页边界就是 tile 边界**：每次按块表取一页 KV 进 UB，页内连续、页间跳转。这带来一个新问题——页内数据按什么顺序摆，直接决定每页搬运的合并度。这就是下一节 Layout 的主题。
 
 ### 7.7 数据排布 Layout：摆法决定访存连续性
 
-7.2.4 立过规矩：**相邻线程要读相邻地址**。前面各节切块时都默认"tile 的最内维在内存里连续"，但真实系统里这个前提常常不成立——同一份逻辑数据，物理摆法（Layout）不同，同一个 tile 的搬运代价能差几十倍。本节把 Attention 生态的七种排布一次讲清。命名出自昇腾 CANN ops-transformer 算子库（FIA/IFA/SMLA 等），也是 MindIE / vLLM-Ascend 推理链路的通用语言；GPU 生态的同构布局在 7.7.5 对照。
+7.2.4 立过规矩：**搬运要成段，tile 的最内维必须对应内存连续维**。前面各节切块时都默认这个前提成立，但真实系统里它常常不成立——同一份逻辑数据，物理摆法（Layout）不同，同一个 tile 的搬运代价能差几十倍。本节把 Attention 生态的七种排布一次讲清。命名出自昇腾 CANN ops-transformer 算子库（FIA/IFA/SMLA 等），是 MindIE / MindSpeed / vLLM-Ascend 推理链路的通用语言；GPU 生态的同构布局在 7.7.5 对照。
 
 #### 7.7.1 为什么 Layout 是 Tiling 问题
 
 一个 tile 是**逻辑空间里的矩形**（比如"某头连续 128 个 token 的 K 向量"），但内存是**一维字节流**。逻辑矩形映射到一维流时：
 
-- 若矩形最内维恰好是内存连续维 → 整块是**少数几个连续段**，合并访存吃满带宽；
-- 若最内维跨步（stride）分布 → 同样一块数据散成**几十上百个碎片段**，每段一次事务，有效带宽崩塌。
+- 若矩形最内维恰好是内存连续维 → 整块是**少数几个连续段**，`DataCopy` 成段搬运吃满带宽；
+- 若最内维跨步（stride）分布 → 同样一块数据散成**几十上百个碎片段**，每段一次搬运，有效带宽崩塌。
 
 描述映射的工具是 **stride（步长）**：形状 $(d_0, d_1, \dots)$ 的张量，行优先下第 $i$ 维的 stride 是其后各维长度之积，元素偏移 = 各维下标 × 对应 stride 之和。**换 Layout = 换 stride 解释；换物理摆法 = 真的搬字节**。前者零拷贝（view），后者要付搬运费（copy）——这个区分贯穿本节。
 
@@ -5344,7 +5428,7 @@ Decode 的三个关键点：
 
 *表7.7.2-1 符号约定（K 与 V 同构，一律以 K 举例；行优先连续存储）*
 
-统一示例：$B=2$ 条序列，实际长 $S_0=3, S_1=2$ ，padded 到 $S=3$ ；token 记 $a_0 a_1 a_2 \mid b_0 b_1$ ，$T=5$ ；$N=2$ 头（$h_0, h_1$），$D=4$ 。
+统一示例： $B=2$ 条序列，实际长 $S_0=3, S_1=2$ ，padded 到 $S=3$ ；token 记 $a_0 a_1 a_2 \mid b_0 b_1$ ， $T=5$ ； $N=2$ 头（ $h_0, h_1$）， $D=4$ 。
 
 **(2) 四种排布总览**
 
@@ -5382,11 +5466,11 @@ $$
 - tile = "一个 token 的全部头"（prefill 按 token 写 KV）→ **token 主序**（BSND/TND）一段连续；head 主序要跨 $S \cdot D$ 跳读；
 - tile = "一个头的连续 token 段"（decode 按头扫 KV、FlashAttention 的 K 块）→ **head 主序**（BNSD/NTD）步长 D 连续；token 主序每 token 跳 $N \cdot D$ 。
 
-变长打包（TND/NTD）额外消灭了 padding 的显存与算力浪费，代价是必须携带 `actualSeqLengths`（前缀和数组，即 cu_seqlens）恢复序列边界——**块表/边界元数据是变长 Tiling 的必备配件**。
+变长打包（TND/NTD）额外消灭了 padding 的显存与算力浪费，代价是必须携带 `actualSeqLengths`（前缀和数组，即 cu_seqlens）恢复序列边界——**块表/边界元数据是变长 Tiling 的必备配件**。昇腾 FIA 公共约束：TND/NTD 场景必须传 `actualSeqLengths`。
 
 #### 7.7.3 三种分页排布：PA_BBND / PA_BNBD / PA_NZ
 
-分页机制（第二章 2.6.4）：KV Cache 从"每序列一整块"改为"固定页长物理页池 + 块表间接寻址"。统一示例取页长 $Z=2$ ：$p_0 = \{a_0, a_1\}$ ，$p_1 = \{a_2, \varnothing\}$ （半页），$p_2 = \{b_0, b_1\}$ ，块表 $[[0,1],[2,\varnothing]]$ 。
+分页机制（第二章 2.6.4）：KV Cache 从"每序列一整块"改为"固定页长物理页池 + 块表间接寻址"。统一示例取页长 $Z=2$ ： $p_0 = \{a_0, a_1\}$ ， $p_1 = \{a_2, \varnothing\}$ （半页）， $p_2 = \{b_0, b_1\}$ ，块表 $[[0,1],[2,\varnothing]]$ 。
 
 ```mermaid
 flowchart TB
@@ -5410,7 +5494,7 @@ flowchart TB
 *表7.7.3-1 三种分页排布：与稠密排布一脉相承——BBND≈BSND 的页化，BNBD≈BNSD 的页化*
 
 - **PA_BNBD 为什么快**：decode 按头做 GEMV，一次访存取到整页同头的 Z 个 D 向量，合并度最高；且不受 PA_BBND 的 $N \cdot D \le 65535$ 硬件指令约束；
-- **PA_NZ 的分形思想**：把页内每头的 $(Z, D)$ 矩阵改存为 $(D/D_0, Z, D_0)$ ——D 维切成 $D_0$ 长的段，段内 Z 个 token 的 $D_0$ 向量连续。$D_0$ 取值让每段恰好 **32 B**：fp16/bf16 时 $D_0 = 16$ ，int8/fp8 时 $D_0 = 32$ 。**这是把 7.1.3 的 DataBlock 对齐直接固化进存储格式**，向量化搬运零浪费。INT8 KV 仅支持 PA_NZ；
+- **PA_NZ 的分形思想**：把页内每头的 $(Z, D)$ 矩阵改存为 $(D/D_0, Z, D_0)$ ——D 维切成 $D_0$ 长的段，段内 Z 个 token 的 $D_0$ 向量连续。 $D_0$ 取值让每段恰好 **32 B**：fp16/bf16 时 $D_0 = 16$ ，int8/fp8 时 $D_0 = 32$ 。**这是把 7.1.3 的 DataBlock 对齐直接固化进存储格式**，与 Cube 核的 NZ 分形操作数同源，向量化搬运零浪费。INT8 KV 仅支持 PA_NZ；
 - **工程约束**：blockSize 推荐 128（fp16 需 16 对齐、int8 需 32 对齐）；分页必须传 `actualSeqLengthsKv`；分页只作用于 KV，Q 永远走稠密排布。
 
 #### 7.7.4 排布变换：view 还是 copy
@@ -5434,7 +5518,7 @@ $$
 p = \text{blockTable}[b,\ s \,\mathrm{div}\, Z], \qquad z = s \bmod Z
 $$
 
-**页长 Z 就是 tile 边长**：scatter kernel 按页写、attention kernel 按页读，页内主序与源一致时全程无重排。昇腾算子还允许输入/输出异构，用下划线组合命名（左=Q 排布，右=输出排布）：如 `TND_NTD` 表示"按 token 主序读 Q、按 head 主序写输出"，全程零拷贝——**Layout 选择可以直接编码进算子接口**。
+**页长 Z 就是 tile 边长**：scatter kernel（`reshape_and_cache` 类）按页写、attention kernel 按页读，页内主序与源一致时全程无重排。昇腾算子还允许输入/输出异构，用下划线组合命名（左=Q 排布，右=输出排布）：如 `TND_NTD` 表示"按 token 主序读 Q、按 head 主序写输出"，全程零拷贝——**Layout 选择可以直接编码进算子接口**。
 
 #### 7.7.5 选型指南与 GPU 生态对照
 
@@ -5473,44 +5557,42 @@ flowchart TB
 
 ### 7.8 调优、融合与量化：从手调到工程
 
-前七节建立了"算账 → 切块 → 摆数据"的方法论。本节回答工程落地的三个问题：**怎么知道该调什么（Profiling）、怎么让机器帮你调（Autotune）、以及融合与量化如何改写账本**。
+前七节建立了"算账 → 切块 → 摆数据"的方法论。本节回答工程落地的三个问题：**怎么知道该调什么（Profiling）、怎么让机器帮你调（TilingSolver）、以及融合与量化如何改写账本**。
 
 #### 7.8.1 Profiling 驱动：用数据而非感觉调块大小
 
 调优闭环四步：**判断受限类型 → 看对应指标 → 只改一个参数 → 复测对比**。
 
-- GPU 用 **Nsight Compute**：`Memory Throughput`（带宽吃到几成）、`Compute Throughput`（算力吃到几成）、`Occupancy`（驻留 warp 占比）、`Stall Reason`（`long_scoreboard` 高 = 在等显存数据）；
-- 昇腾用 **msprof / MindStudio Profiling**：看 AI Core 的搬入/搬出/计算各管道耗时占比，瓶颈管道一目了然。
+- 昇腾用 **msprof / MindStudio Profiling**：看 AI Core 各管道耗时占比——MTE2（搬入）、MTE1（L1→L0）、Vector、Cube、MTE3（搬出），瓶颈管道一目了然；再对照 `npu-smi info` 确认实际 SKU 的核数与 HBM 规格；
+- GPU 对照用 Nsight Compute：`Memory Throughput`、`Compute Throughput`、`Occupancy`、`Stall Reason`（`long_scoreboard` 高 = 在等显存数据）。
 
 两个典型诊断：
 
-1. **Memory Throughput 已 90%+ 但算力空闲** → 访存受限实锤，调块大小收益有限，该上融合/量化/GQA（提高 AI）；
-2. **加大 BLOCK 后反而变慢，Occupancy 掉半** → SMEM/寄存器超限导致每 SM 驻留块数减半，掩盖延迟能力下降——四约束账本的"容量"项报警，回退块大小或减双缓冲份数。
+1. **MTE2/MTE3 占比高、Cube/Vector 大量空闲** → 访存受限实锤，调块大小收益有限，该上融合/量化/GQA（提高 AI）；
+2. **加大 tile 后反而变慢** → UB 超限导致双缓冲被砍或数据溢出，掩盖延迟能力下降——四约束账本的"容量"项报警，回退块大小或减缓冲份数。
 
 **先纸上算账（7.2），再 Profiling 验证，最后才动代码**——顺序反了就会陷入"盲试参数"的泥潭。
 
 #### 7.8.2 自动调优：让机器搜索 Tiling 函数
 
-块大小空间是组合爆炸的（ $B_M \times B_N \times B_K \times$ 缓冲份数 × warp 数 × …），手调只能覆盖几个点。工业做法是**把 Tiling 函数变成搜索问题**：
+块大小空间是组合爆炸的（ $B_M \times B_N \times B_K \times$ 缓冲份数 × 核数 × …），手调只能覆盖几个点。工业做法是**把 Tiling 函数变成搜索问题**：
+
+- **昇腾 TilingSolver / Tiling API**：host 侧 tiling 参数的自动求解——按硬件约束（UB/L1/L0C 容量、核数、对齐）剪枝后搜索块参数，是 AscendC 生态的 autotune 主力；
+- **Triton autotune**（GPU 对照）：首次遇到新 shape 时把候选配置各跑一遍取最快，`key` 声明哪些参数变化触发重搜：
 
 ```python
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64,  'BLOCK_K': 32}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'BLOCK_K': 32}, num_stages=4, num_warps=4),
     ],
     key=['M', 'N', 'K'],   # shape 变了才重新搜索，结果缓存复用
 )
-@triton.jit
-def matmul_kernel(...): ...
 ```
 
-- **Triton autotune**：首次遇到新 shape 时把候选配置各跑一遍取最快，`key` 声明哪些参数变化触发重搜；
-- **TorchInductor（`max-autotune`）**：编译器层面搜索 tile 尺寸、融合策略与后端（Triton vs cuBLAS）；
-- **昇腾 TilingSolver / Tiling API**：host 侧 tiling 函数的自动求解，按硬件约束剪枝后搜索块参数。
+- **TorchInductor（`max-autotune`）**：编译器层面搜索 tile 尺寸、融合策略与后端。
 
-关键工程意识：**搜索空间要用四约束先剪枝**——SMEM 超限的配置直接剔除，块数远小于核数的配置降权。约束账本不仅是分析工具，也是搜索的剪枝器。
+关键工程意识：**搜索空间要用四约束先剪枝**——UB/L0C 超限的配置直接剔除，块数远小于核数的配置降权。约束账本不仅是分析工具，也是搜索的剪枝器。
 
 #### 7.8.3 算子融合：把多个算子的搬运账合并
 
@@ -5518,46 +5600,46 @@ def matmul_kernel(...): ...
 
 1. **逐元素链融合**：`add → mul → gelu` 合成一个 kernel，流量从"每算子一读一写"压到"一读一写"——对 AI≈0.08 的算子，这是数量级的提升；
 2. **归约融合**：7.5 的融合 Softmax、LayerNorm 已是典范——统计量与变换共享同一次读入；
-3. **GEMM epilogue 融合**：bias 加、激活、量化反量化直接挂在 GEMM 写回前（累加器还在寄存器里），省掉一次独立的逐元素 kernel。
+3. **GEMM epilogue 融合**：bias 加、激活、量化直接挂在写回前。**A5 把这条路修进了硬件**：`Fixpipe` 随路量化（FP32/INT32 → BF16/FP16/FP8/INT8）+ NZ→ND 转换在 L0C→UB 通路上完成；Cube 与 Vector 之间还有 SSBuffer 直通道，矩阵乘与后处理两类流水独立重叠——分离架构的融合红利。
 
-**融合不一定更快**，三个反例要警惕：① 融合后寄存器压力超限 → occupancy 崩塌；② 融合迫使重算（如反向重算前向）→ FLOPs 上升；③ 拆开了本可调用的高度优化库 kernel（cuBLAS）→ 单算子效率下降。**判断标准仍是账本：融合省下的 Bytes × 1/BW，是否大于新增的计算与容量代价。**
+**融合不一定更快**，三个反例要警惕：① 融合后 UB/寄存器压力超限 → 双缓冲被砍；② 融合迫使重算（如反向重算前向）→ FLOPs 上升；③ 拆开了本可调用的高度优化库 kernel（如 ops-transformer / cuBLAS）→ 单算子效率下降。**判断标准仍是账本：融合省下的 Bytes × 1/BW，是否大于新增的计算与容量代价。**
 
-Tile 划分还要兼顾融合各方的访问模式：逐元素要连续一维块，归约要整行，GEMM 要二维块——**融合 kernel 的 tile 是各方约束的交集**，这也是编译器融合（Inductor）比手写融合省心的原因。
+Tile 划分还要兼顾融合各方的访问模式：逐元素要连续一维块，归约要整行，GEMM 要二维块——**融合 kernel 的 tile 是各方约束的交集**。
 
 #### 7.8.4 低精度 Tiling：量化改写容量账与算力账
 
 第六章把权重/KV 压到 INT8/INT4/FP8 后，Tiling 账本有三处连锁变化：
 
-1. **容量账松绑**：每元素字节减半 → 同样 SMEM 装下**两倍大的 tile** → 复用率公式里 $B_M, B_N$ 可以开大 → AI 上升。fp16 时装不下的 256×128 块，int8 下轻松装下；
-2. **算力账换屋顶**：INT8/FP8 Tensor Core 吞吐翻倍， $P_{\text{peak}}$ 与脊点 $AI^{*}$ 同步上移——**原来计算受限的 GEMM 可能重新变成访存受限**，块大小必须重搜，不能沿用 fp16 配置；
-3. **tile 里多了"配件"**：per-group 量化的 scale/zero-point 要随数据块一起搬入（第六章 6.4）；MXFP8/FP4 微缩放格式更是把 block scale 固化进 tile 结构（第三章教程 10 的块缩放 GEMM）。INT4 weight-only 方案还要在 kernel 内反量化，tile 划分需给反量化中间量留容量。
+1. **容量账松绑**：每元素字节减半 → 同样 UB/L1 装下**两倍大的 tile** → 复用率公式里 $B_M, B_N$ 可以开大 → AI 上升。fp16 时 L0C 顶格的块，int8 累加（INT32 宽度不变，但输入操作数减半）下输入侧压力直接减半；
+2. **算力账换屋顶**：A5 的 Cube 原生 FP8/HiF8/MXFP8 吞吐 2×、MXFP4 吞吐 4×，脊点从 122 抬到 243/487（表7.2.2-1）——**原来计算受限的 GEMM 可能重新变成访存受限**，块大小必须重搜。**A2/A3 没有 FP8 算力行**，低精度只有 INT8 一条路；存量 INT4 权重在 A5 上走 MSD 补偿路径（第六章 6.7），tiling 还要给"两趟 GEMM + 累加器合成"留 L0C 余量；
+3. **tile 里多了"配件"**：per-group 量化的 scale/zero-point 要随数据块一起搬入（第六章 6.4）；MXFP8/MXFP4 微缩放格式把每 32 元素一个的 E8M0 块 scale 固化进 tile 结构，Cube 沿 K 累加时按块边界应用 scale（第六章 6.5）。GPU 对照：Triton 教程 10 的块缩放 GEMM 是同一问题的 NVIDIA 解法。
 
-KV Cache 侧的对应变化已在 7.7.3 见过：int8 KV 走 PA_NZ、$D_0$ 从 16 变 32（保持 32 B 段）、每页装下的 token 数翻倍。**量化与 Tiling 是互相成就的：量化省搬运，Tiling 把省下的容量换成更大的复用块。**
+KV Cache 侧的对应变化已在 7.7.3 见过：int8 KV 走 PA_NZ、 $D_0$ 从 16 变 32（保持 32 B 段）、每页装下的 token 数翻倍。**量化与 Tiling 是互相成就的：量化省搬运，Tiling 把省下的容量换成更大的复用块。**
 
 ### 7.9 工具选型与本章小结
 
-#### 7.9.1 工具定位：Triton / TileLang / CUDA / AscendC
+#### 7.9.1 工具定位：AscendC 为主，其余对照
 
 | 工具 | 抽象层级 | 控制力 | 定位 |
 |---|---|---|---|
-| **Triton** | tile 级（program 操作整块） | 中（编译器管线程/流水） | 快速验证与生产主力，autotune 生态成熟 |
-| **TileLang** | tile 一等公民 + 显式流水 | 中高（可手写 pipeline/布局） | 想要 Triton 的简洁 + 接近 CUDA 的控制 |
-| **CUDA / CUTLASS** | 线程级 | 最强（TMA、wgmma、手工调度） | 工业极限性能内核，学习成本最高 |
-| **AscendC** | 核内 tile + 显式 Buffer 管理 | 高（UB/L0 搬运、Queue 双缓冲手写） | 昇腾生态主力，tiling 函数 host 侧显式编写 |
+| **AscendC** | 核内 tile + 显式 Buffer 管理 | 高（UB/L0 搬运、TQue 双缓冲、tiling 函数 host 显式编写） | **昇腾生态主力，本章教学载体** |
+| Triton | tile 级（program 操作整块） | 中（编译器管线程/流水） | GPU 快速验证与生产主力，autotune 生态成熟 |
+| TileLang | tile 一等公民 + 显式流水 | 中高 | Triton 的简洁 + 接近 CUDA 的控制 |
+| CUDA / CUTLASS | 线程级 | 最强（TMA、wgmma、手工调度） | GPU 工业极限性能内核 |
 
-*表7.9.1-1 四条工具路线：抽象越高开发越快，控制越强极限越高*
+*表7.9.1-1 四条工具路线：抽象越高开发越快，控制越强极限越高；昇腾开发者以 AscendC 为母语*
 
-本章全程用 Triton 作教学载体，正是因为它把"tile 映射 + 掩码 + 块大小"暴露给你、把其余细节藏起来——**先学会思考 tile，再决定要不要下探线程**。
+本章用 AscendC 作教学载体：它把"tiling 函数 + 三段流水 + Buffer 容量"全部显式暴露——**四约束账本的每一项都能在代码里指认**。Triton 对照版帮助理解"编译器替你做了什么"，第三章已系统覆盖。
 
 #### 7.9.2 向下深入的判断标准
 
-什么时候值得从 tile 级下探到线程级？三条信号：
+什么时候值得从高层 API 下探到手写流水？三条信号：
 
-1. 需要修改**编译器不暴露的调度**（自定义 swizzle、持久化内核的块分配）；
-2. 需要压榨**最新硬件特性**（TMA 异步搬运、wgmma/tcgen05、昇腾新指令），编译器支持滞后；
-3. 需要读懂/修改 **CUTLASS 级工业内核**。
+1. 需要修改**库不暴露的调度**（自定义核间块映射、L2 友好的执行顺序、持久化 kernel）；
+2. 需要压榨**硬件细节**（UB bank conflict 规避、手工 `Mmad`/`Fixpipe` 流水、A5 SIMD/SIMT 混合、随路量化的格式组合）；
+3. 需要读懂/修改 **ops-transformer / CUTLASS 级工业内核**。
 
-反之，绝大多数学习与应用需求，tile 级抽象已经覆盖。**下探是手段不是目的**——第三章 3.9 的 Gluon 路线就是"带着 tile 思维下探"的样板。
+反之，绝大多数学习与应用需求，AscendC 高阶 API + tiling 调参已经覆盖。**下探是手段不是目的**——CANN 最佳实践文档是下探时的第一参考。
 
 #### 7.9.3 知识地图与核心公式速查
 
@@ -5565,12 +5647,12 @@ KV Cache 侧的对应变化已在 7.7.3 见过：int8 KV 走 PA_NZ、$D_0$ 从 1
 flowchart TB
     F["四约束账本<br/>计算量 · 访存量 · 片上容量 · 并行度"]
     F --> R["Roofline：AI 与脊点<br/>判断受限类型（7.2）"]
-    F --> G["GEMM 复用：AI ≈ B_M·B_N/(B_M+B_N)<br/>块大小三方权衡（7.4）"]
+    F --> G["GEMM 复用：AI ≈ B_M·B_N/(B_M+B_N)<br/>L1/L0C 容量与核数权衡（7.4）"]
     F --> S["归约分块：Online Softmax<br/>局部统计 + 合并（7.5）"]
     R --> FA["FlashAttention：分块 + 在线归约 + 跳块<br/>Prefill/Decode 两套策略（7.6）"]
     S --> FA
     FA --> L["Layout：tile 最内维 = 内存连续维<br/>七排布选型（7.7）"]
-    L --> E["工程闭环：Profiling → Autotune<br/>融合 / 量化改写账本（7.8）"]
+    L --> E["工程闭环：msprof → TilingSolver<br/>融合 / 量化改写账本（7.8）"]
 ```
 
 *图7.9.3-1 本章知识地图：四约束是根，其余全是它在不同算子上的展开*
@@ -5579,7 +5661,7 @@ flowchart TB
 |---|---|---|
 | 算术强度 | $AI = \text{FLOPs} / \text{Bytes}_{\text{HBM}}$ | 算子瓶颈体检 |
 | Roofline | $P \le \min(P_{\text{peak}},\ AI \times BW)$ | 可达性能上界 |
-| 脊点 | $AI^{*} = P_{\text{peak}} / BW$ | 受限类型分界（A100≈156） |
+| 脊点 | $AI^{*} = P_{\text{peak}} / BW$ | 受限类型分界（A2≈221 / A5DT≈122） |
 | GEMM 复用率 | $AI \approx B_M B_N / (B_M + B_N)$ | 块大小 → 访存量 |
 | Online Softmax | $m' = \max(m, \tilde{m}),\ \ell' = e^{m - m'} \ell + e^{\tilde{m} - m'} \tilde{\ell}$ | 归约轴安全分块 |
 | Attention 容量约束 | $B \approx M / (4d)$ | FlashAttention 块大小 |
@@ -5591,20 +5673,21 @@ flowchart TB
 
 照此清单走一遍，本章知识即完成内化：
 
-1. **读与算**：读 7.1～7.2，用自己的话写一页"四约束"笔记；手算逐元素加法与 4096³ GEMM 的 AI，在 Roofline 附件上验证；
-2. **写与对**：手写带掩码的 Triton 向量加法，用 N=10 这类不整除 shape 与 PyTorch 对数；
-3. **调与记**：跑通分块 GEMM，先用复用计算器**预测**三组块大小的耗时排序，再实测验证，记录差异来源（L2、尾波、occupancy）；
-4. **画与讲**：读 FlashAttention 分块 + Online Softmax，画出 Q 块、KV 块、运行状态 $(m, \ell, O)$ 的数据流，向别人讲清"为什么外层是 Q"；
-5. **测与判**：用 Profiler 看一个真实算子的 Memory Throughput 与 Occupancy，判断瓶颈是搬数据还是算力，并给出下一步优化方向。
+1. **读与算**：读 7.1～7.2，用自己的话写一页"四约束"笔记；手算逐元素加法与 4096³ GEMM 的 AI，在 Roofline 附件上切 A2/A5 预设验证受限类型；
+2. **写与对**：手写 AscendC 向量加法（host tiling 函数 + 核内三段流水），用 N=10 这类不整除 shape 与 PyTorch 对数；
+3. **调与记**：跑通分块 GEMM，先用复用计算器**预测**三组块大小的耗时排序，再上机实测验证，记录差异来源（L2、尾波、双缓冲）；
+4. **画与讲**：读 FlashAttention 分块 + Online Softmax，画出 Q 块、KV 块、运行状态 $(m, \ell, O)$ 的数据流，向别人讲清"为什么外层是 Q"与"A5 分离架构帮了什么"；
+5. **测与判**：用 msprof 看一个真实算子的 MTE/Cube/Vector 管道占比，判断瓶颈是搬数据还是算力，并给出下一步优化方向。
 
 #### 7.9.5 参考与延伸
 
+- 昇腾 950 NPU 架构白皮书（本章 A5 数值来源）；CANN AscendC 编程指南与最佳实践（UB 容量、DataCopy 对齐、Vector 每拍 512 B 读写）
+- CANN ops-transformer 算子文档（FIA / IFA / SMLA，Layout 规范出处）：<https://gitcode.com/cann/ops-transformer>
+- CANN 极致优化 GroupedMatmul 量化方案：W4A8 与 MSD：<https://www.hiascend.com/developer/techArticles/20250717-2>
 - Roofline 模型：Williams, Waterman, Patterson, *Roofline: An Insightful Visual Performance Model for Multicore Architectures*, CACM 2009
-- FlashAttention：Dao et al., *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*, NeurIPS 2022；*FlashAttention-2*, 2023；FlashDecoding 博客（Tri Dao et al., 2023）
+- FlashAttention：Dao et al., NeurIPS 2022；*FlashAttention-2*, 2023；FlashDecoding 博客（Tri Dao et al., 2023）
 - PagedAttention：Kwon et al., *Efficient Memory Management for Large Language Model Serving with PagedAttention*, SOSP 2023
-- Triton 官方教程 01/02/03/06（本书第三章 3.4 已详解）；CUTLASS 与 TileLang 文档
-- 昇腾 CANN：AscendC Tiling 开发指南；ops-transformer 算子文档（FIA / IFA / SMLA，Layout 规范出处）：<https://gitcode.com/cann/ops-transformer>
-- 本书交叉引用：第二章 2.5/2.6/2.8（FlashAttention、KV Cache、GQA），第三章 3.3/3.4/3.9（Triton 编程模型与进阶），第六章（数据类型与量化）
+- 本书交叉引用：第二章 2.5/2.6/2.8（FlashAttention、KV Cache、GQA），第三章 3.3/3.4/3.9（Triton 对照），第六章 6.4/6.5/6.7（量化粒度、MX 格式、硬件选型）
 
 ## 第八章 CANNBot与CANNBotDSL
 

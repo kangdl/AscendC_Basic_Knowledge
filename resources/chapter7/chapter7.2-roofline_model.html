@@ -47,16 +47,21 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
     <h2>模型</h2>
     <div class="formula">算术强度 $AI = \dfrac{\text{FLOPs}}{\text{Bytes}_{\text{HBM}}}$，可达性能 $P \le \min\bigl(P_{\text{peak}},\ AI \times BW\bigr)$，脊点 $AI^{*} = P_{\text{peak}} / BW$。</div>
     <div class="controls">
-      <div class="ctl"><label>峰值算力 P_peak</label><input type="range" id="rP" min="10" max="2000" step="1" value="312"><span class="val" id="vP">312 TFLOPS</span></div>
-      <div class="ctl"><label>峰值带宽 BW</label><input type="range" id="rB" min="0.1" max="10" step="0.05" value="2"><span class="val" id="vB">2.00 TB/s</span></div>
+      <div class="ctl"><label>峰值算力 P_peak</label><input type="range" id="rP" min="10" max="2000" step="1" value="486"><span class="val" id="vP">486 TFLOPS</span></div>
+      <div class="ctl"><label>峰值带宽 BW</label><input type="range" id="rB" min="0.1" max="10" step="0.05" value="4"><span class="val" id="vB">4.00 TB/s</span></div>
     </div>
     <div class="controls">
       <div class="ctl"><label>算术强度 AI</label><input type="range" id="rAI" min="-2" max="4" step="0.01" value="0"><span class="val" id="vAI">1.00 FLOP/B</span></div>
-      <button class="secondary" id="hwA100">A100 预设</button>
-      <button class="secondary" id="hwH100">H100 预设</button>
+      <button class="secondary" id="hwA2">A2·910B2</button>
+      <button class="secondary" id="hwA5PR">A5·950PR</button>
+      <button class="secondary" id="hwA5DT">A5·950DT</button>
+      <button class="secondary" id="hwA5FP8">A5·FP8</button>
+      <button class="secondary" id="hwA5FP4">A5·MXFP4</button>
+      <button class="secondary" id="hwA100">GPU·A100</button>
+      <button class="secondary" id="hwH100">GPU·H100</button>
     </div>
     <div class="presets" id="presets"></div>
-    <div class="note">预设算子（fp16 口径）：逐元素加法 AI≈0.083；Softmax AI≈1.25；Decode Attention AI≈1；GQA×8 的 Decode AI≈8；分块 GEMM（128 见方块）AI≈64；4096 大方阵 GEMM 理想 AI≈1365。</div>
+    <div class="note">硬件预设（Cube fp16 口径，A5 另给 FP8/MXFP4 屋顶）：A2·910B2 353T/1.6TB/s（脊点≈221）；A5·950PR 432T/1.6TB/s（≈270）；A5·950DT 486T/4TB/s（≈122）；FP8 973T（≈243）；MXFP4 1946T（≈487）。预设算子：逐元素加法 AI≈0.083；Softmax AI≈1.25；Decode Attention AI≈1；GQA×8 的 Decode AI≈8；分块 GEMM（128 见方块）AI≈64；4096 大方阵 GEMM 理想 AI≈1365。</div>
   </div>
 
   <div class="card">
@@ -109,6 +114,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)'], ['$', '$']], displayMath:
     b.onclick = function () { $('rAI').value = Math.log10(p.ai); render(); };
     pbox.appendChild(b);
   });
+  $('hwA2').onclick = function () { $('rP').value = 353; $('rB').value = 1.6; render(); };
+  $('hwA5PR').onclick = function () { $('rP').value = 432; $('rB').value = 1.6; render(); };
+  $('hwA5DT').onclick = function () { $('rP').value = 486; $('rB').value = 4; render(); };
+  $('hwA5FP8').onclick = function () { $('rP').value = 973; $('rB').value = 4; render(); };
+  $('hwA5FP4').onclick = function () { $('rP').value = 1946; $('rB').value = 4; render(); };
   $('hwA100').onclick = function () { $('rP').value = 312; $('rB').value = 2; render(); };
   $('hwH100').onclick = function () { $('rP').value = 989; $('rB').value = 3.35; render(); };
   ['rP', 'rB', 'rAI'].forEach(function (id) { $(id).addEventListener('input', render); });

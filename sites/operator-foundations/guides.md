@@ -307,19 +307,20 @@ round(0.76 / 0.5) = 2，还原结果为 1.0（假定未超出整数表示范围�
 
 ### 小节导读
 
-- 7.1 两笔账（容量账：32 MB 矩阵 vs 192 KB 案板；时间账：搬 1 字节够算 156 次）引出四约束账本与主块/尾块/DataBlock 术语。
-- 7.2 内存金字塔与 Roofline：AI = FLOPs/Bytes，脊点 AI* = P_peak/BW（A100≈156）；逐元素/Softmax/Decode 深度访存受限，大方阵 GEMM 计算受限。
-- 7.3 第一个 tiled kernel：Triton tile 级思维，带掩码向量加法；尾块用 mask + other 保护，测试 shape 故意不整除。
-- 7.4 分块 GEMM：K 循环是复用发生的场所；AI ≈ B_M·B_N/(B_M+B_N)，128 方块 → 64 FLOP/B，比朴素省 126 倍；块大小三方权衡 + L2 swizzle + 优化阶梯。
+- 7.1 两笔账（容量账：32 MB 矩阵 vs A5 UB 248 KB 案板；时间账：950DT 搬 1 字节够算 122 次、A2 够算 221 次）引出四约束账本与主块/尾块/DataBlock 术语。
+- 7.2 达芬奇 Buffer 金字塔（L1/L0A/L0B/L0C/UB/SSBuffer，A2/A3/A5 三代对照）与 Roofline：脊点 A2≈221、A5DT fp16≈122、FP8≈243、MXFP4≈487；950DT 带宽涨得比算力快，fp16 脊点反而比 A2 低。
+- 7.3 第一个 tiled kernel：AscendC host tiling 函数（TilingData）+ 核内 CopyIn/Compute/CopyOut 三段流水（TPipe/TQue）；尾块走 DataCopyPad 与 32B 对齐，测试 shape 故意不整除；Triton 作对照。
+- 7.4 Cube 分块 GEMM：HBM→L1→L0→L0C→Fixpipe 通路，K 循环是复用发生的场所；AI ≈ B_M·B_N/(B_M+B_N)，128 方块 → 64 FLOP/B，比朴素省 126 倍；L0C 是最硬容量天花板 + L2 调度 + 优化阶梯。
 - 7.5 归约不能朴素分块（局部 softmax 反例）；Online Softmax 用 (m, ℓ) 运行统计 + rescale 精确合并；"局部统计 + 合并"模式贯穿全章。
-- 7.6 FlashAttention：不物化 N×N，IO 从 Θ(N²) 降到 Θ(N²d²/M)；v2 外层 Q 块独占输出；因果掩码按块跳过省约一半；Decode 走 FlashDecoding 与 Paged KV。
+- 7.6 FlashAttention：不物化 N×N，IO 从 Θ(N²) 降到 Θ(N²d²/M)；v2 外层 Q 块独占输出；A5 分离架构（AIC 矩阵 + AIV softmax + SSBuffer）；因果掩码按块跳过省约一半；Decode 走 FlashDecoding 与 Paged KV。
 - 7.7 七种 Attention 排布：BSND/BNSD/TND/NTD 稠密四式 + PA_BBND/PA_BNBD/PA_NZ 分页三式；tile 最内维必须对齐内存连续维，decode 分页首选 PA_BNBD。
-- 7.8 工程闭环：Profiling 判断受限类型 → autotune 搜索 Tiling 函数 → 融合合并搬运账 → 量化改写容量账与算力账。
-- 7.9 Triton/TileLang/CUDA/AscendC 选型、向下深入三信号、七公式速查与最小学习闭环。
+- 7.8 工程闭环：msprof 看 MTE/Cube/Vector 管道占比 → TilingSolver 搜索 Tiling 函数 → 融合（Fixpipe 随路量化/SSBuffer）→ 量化改写容量账与算力账（A5 原生 MXFP4 vs A2 仅 INT8）。
+- 7.9 AscendC 为主、Triton/TileLang/CUDA 对照的工具选型、向下深入三信号、七公式速查与最小学习闭环。
 
 ### 延伸阅读
 
 - [昇腾社区 · Tiling 优化](https://www.hiascend.com/developer/techArticles/20240920-1)
+- [昇腾 950 NPU 架构白皮书](https://public-download.obs.cn-east-2.myhuaweicloud.com/ascend/%E6%98%87%E8%85%BE950%20NPU%E6%9E%B6%E6%9E%84%E7%99%BD%E7%9A%AE%E4%B9%A6.pdf)
 - [FlashAttention](https://arxiv.org/abs/2205.14135)
 - [FlashAttention-2](https://arxiv.org/abs/2307.08691)
 - [PagedAttention / vLLM](https://arxiv.org/abs/2309.06180)

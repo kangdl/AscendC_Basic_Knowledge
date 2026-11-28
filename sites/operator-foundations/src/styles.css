@@ -10,9 +10,9 @@
   --accent-light: #f0e0d5;
   --sage: #dbe3d0;
   --sage-ink: #3f5539;
-  --sans: "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-  --serif: Georgia, "Songti SC", "Noto Serif CJK SC", "SimSun", serif;
-  --mono: "Cascadia Code", Consolas, monospace;
+  --sans: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --serif: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --mono: Consolas, "Microsoft YaHei", "Courier New", monospace;
   --bar: 68px;
   --rail-size: 260px;
 }

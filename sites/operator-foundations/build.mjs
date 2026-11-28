@@ -224,6 +224,12 @@ function render(lines) {
       index = result.end;
       continue;
     }
+    // 独立题注行（图/表）：渲染为题注段落，不带裸星号
+    const captionOnly = kind === 'paragraph' && line.match(/^\s*\*((?:图|表)[^*]+)\*\s*$/);
+    if (captionOnly) {
+      output.push('<p class="caption">' + inline(captionOnly[1]) + '</p>');
+      continue;
+    }
     const group = [line];
     while (index < lines.length && blockKind(lines[index]) === kind) group.push(lines[index++]);
     if (kind === 'table') output.push(table(group));

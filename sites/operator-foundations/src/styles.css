@@ -211,6 +211,7 @@ tbody th { min-width: 8ch; }
 .math-display .katex { display: inline-block; width: max-content; overflow-wrap: normal; }
 .resource-embed, .mermaid-figure { margin: 18px 0; }
 .resource-embed figcaption, .mermaid-figure figcaption { color: var(--muted); font-size: 14px; font-weight: 600; }
+.caption { color: var(--muted); font-size: 14px; font-weight: 600; margin: 8px 0 13px; }
 .resource-embed figcaption { margin-bottom: 8px; }
 .resource-embed iframe { display: block; width: 100%; border: 0; }
 .mermaid-diagram { display: block; padding: 12px; border: 1px solid var(--rule); border-radius: 12px; background: var(--card); }

@@ -220,11 +220,11 @@ CopyOut 阶段需要等哪一步完成？
 
 ### 摘要
 
-用一组数字体验量化、反量化与舍入误差。
+从"一个数怎么存"到"整个模型怎么压"，沿六级阶梯理解量化。
 
 ### 导读
 
-量化用有限的低精度数值表示连续或高精度数据。最简单的对称均匀量化可以写成 q = clamp(round(x / s))，反量化时计算 x̂ = s·q。
+量化用更少的比特换取显存与带宽，代价是可控的精度损失。本章沿"一个数怎么存 → 一个数怎么压 → 一组数怎么压 → 换更小的数 → 一层/整个模型怎么压 → 落到芯片上"的阶梯展开，配浮点位级实验台与量化网格实验台两个交互附件。
 
 ### 图解：对称量化示例（scale = 0.5）
 
@@ -241,12 +241,32 @@ CopyOut 阶段需要等哪一步完成？
 | FP32 | 32 位浮点，包含符号位、指数和尾数。 |
 | FP16 与 BF16 | 同为 16 位浮点。BF16 的指数范围更大，FP16 的尾数位更多。 |
 | INT8 | 8 位整数。用来表示量化张量时，通常需要同时记录缩放因子。 |
+| FP8（E4M3/E5M2） | 8 位浮点。E4M3 偏精度（推理），E5M2 偏范围（梯度）。 |
+| FP4（E2M1）与 MX/NVFP4 | 4 位浮点只有 16 个编码，靠每 32/16 元素共享的块 scale 扩展动态范围。 |
 
 ### 练习
 
 缩放因子保持 0.5，把 0.76 量化后再还原，结果是什么？
 
 round(0.76 / 0.5) = 2，还原结果为 1.0（假定未超出整数表示范围）。
+
+### 小节导读
+
+- 6.1 用显存账与带宽账说明为什么量化：7B 模型 INT4 体积降到 1/4，Decode 阶段理论提速约 4 倍。
+- 6.2 浮点是二进制科学计数法：指数管范围、尾数管精度；手算 0.78515625 的精确编码与 5250.78515625 的舍入（BF16 → 5248，FP16 → 5252）。
+- 6.3 仿射量化 q = round(x/s) + z 人为铺均匀格子；误差来自舍入（≤ s/2）与截断，校准在两者之间选格距。
+- 6.4 一个离群值会撑粗整组格子；粒度阶梯 per-tensor → channel → group → token；SmoothQuant 用逐通道等价缩放把量化难度从激活迁移到权重。
+- 6.5 FP8/FP4 复刻"范围换精度"的取舍，靠砍特殊值换编码；MX/NVFP4 把共享 scale 写进格式定义，2 的幂 scale 在硬件上是指数加法。
+- 6.6 PTQ 主流、QAT 兜底；RTN 最近舍入、GPTQ 逐列补偿、AWQ 保护显著通道；方案命名 WxAy，KV Cache 量化与权重量化正交。
+- 6.7 格式跟着硅片走：位切分决定 1:2:4 吞吐幂次；昇腾 950 原生 MXFP4，存量 INT4 走 MSD 补偿路径；选型四问——硬件、校准数据、吞吐/显存、跨平台。
+- 6.8 三条元规律：一切量化都是"铺格子 + 舍入"；比特是可以交易的筹码；等价变换是免费的午餐。
+
+### 延伸阅读
+
+- [GPTQ](https://arxiv.org/abs/2210.17323)
+- [AWQ](https://arxiv.org/abs/2306.00978)
+- [SmoothQuant](https://arxiv.org/abs/2211.10438)
+- [OCP Microscaling Formats（MX）规范](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)
 
 ## Tiling 优化
 
@@ -257,11 +277,11 @@ round(0.76 / 0.5) = 2，还原结果为 1.0（假定未超出整数表示范围�
 
 ### 摘要
 
-把数据切成可执行的块，理解尾块、片上容量与并行度。
+用"计算量、访存量、片上容量、并行度"四约束账本切块，从向量加法一路走到 FlashAttention 与工程调优。
 
 ### 导读
 
-Tiling 将大张量划分为更小的计算块。选择块大小时，同时考虑片上空间、访存对齐、尾块处理与并行程度。
+芯片算得飞快、数据却搬不过来——Tiling 通过"切块 + 复用"把显存搬运量压下去。本章沿"一个元素 → 一个矩阵 → 一行归约 → 一个 Attention → 数据排布 → 工程调优"的阶梯展开，配 Roofline 交互模型、GEMM 分块复用计算器、Attention Layout 浏览器三个交互附件。
 
 ### 图解：长度 18、块大小 8 的示例
 
@@ -285,9 +305,53 @@ Tiling 将大张量划分为更小的计算块。选择块大小时，同时考�
 
 不会。每块 6 个元素，正好需要 3 块。
 
+### 小节导读
+
+- 7.1 两笔账（容量账：32 MB 矩阵 vs 192 KB 案板；时间账：搬 1 字节够算 156 次）引出四约束账本与主块/尾块/DataBlock 术语。
+- 7.2 内存金字塔与 Roofline：AI = FLOPs/Bytes，脊点 AI* = P_peak/BW（A100≈156）；逐元素/Softmax/Decode 深度访存受限，大方阵 GEMM 计算受限。
+- 7.3 第一个 tiled kernel：Triton tile 级思维，带掩码向量加法；尾块用 mask + other 保护，测试 shape 故意不整除。
+- 7.4 分块 GEMM：K 循环是复用发生的场所；AI ≈ B_M·B_N/(B_M+B_N)，128 方块 → 64 FLOP/B，比朴素省 126 倍；块大小三方权衡 + L2 swizzle + 优化阶梯。
+- 7.5 归约不能朴素分块（局部 softmax 反例）；Online Softmax 用 (m, ℓ) 运行统计 + rescale 精确合并；"局部统计 + 合并"模式贯穿全章。
+- 7.6 FlashAttention：不物化 N×N，IO 从 Θ(N²) 降到 Θ(N²d²/M)；v2 外层 Q 块独占输出；因果掩码按块跳过省约一半；Decode 走 FlashDecoding 与 Paged KV。
+- 7.7 七种 Attention 排布：BSND/BNSD/TND/NTD 稠密四式 + PA_BBND/PA_BNBD/PA_NZ 分页三式；tile 最内维必须对齐内存连续维，decode 分页首选 PA_BNBD。
+- 7.8 工程闭环：Profiling 判断受限类型 → autotune 搜索 Tiling 函数 → 融合合并搬运账 → 量化改写容量账与算力账。
+- 7.9 Triton/TileLang/CUDA/AscendC 选型、向下深入三信号、七公式速查与最小学习闭环。
+
 ### 延伸阅读
 
 - [昇腾社区 · Tiling 优化](https://www.hiascend.com/developer/techArticles/20240920-1)
+- [FlashAttention](https://arxiv.org/abs/2205.14135)
+- [FlashAttention-2](https://arxiv.org/abs/2307.08691)
+- [PagedAttention / vLLM](https://arxiv.org/abs/2309.06180)
+- [Roofline 模型（CACM 2009）](https://dl.acm.org/doi/10.1145/1498765.1498785)
+
+## CANNBot 与 CANNBotDSL
+
+- 路由：cannbot
+- 原稿章节：第八章 CANNBot与CANNBotDSL
+- 图标：network
+- 编号：08
+
+### 摘要
+
+规划中的章节：CANNBot 与 CANNBotDSL 的使用。
+
+### 导读
+
+本章为占位章节，正文编写中。计划介绍 CANNBot 辅助算子开发的方式，以及 CANNBotDSL 的描述与使用流程。
+
+### 速查表
+
+| 关注点 | 说明 |
+| --- | --- |
+| CANNBot | 面向 CANN 开发的智能辅助工具，用法待正文展开。 |
+| CANNBotDSL | 配套的描述语言，语法与示例待正文展开。 |
+
+### 练习
+
+本章当前处于什么状态？
+
+占位状态，正文编写中；完成后本导读将同步更新。
 
 ## 数学附录
 

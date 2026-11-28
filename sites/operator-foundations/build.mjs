@@ -59,7 +59,7 @@ for (const line of source.slice(volume.index).split(/\r?\n/).slice(1)) {
     (section ?? current).lines.push(line);
   }
 }
-if (fenced || pages.length !== 8 || headings.some(({ id }) => id === 's-undefined')) {
+if (fenced || pages.length !== 9 || headings.some(({ id }) => id === 's-undefined')) {
   throw new Error('第二卷目录与预期结构不符');
 }
 

@@ -8,6 +8,14 @@ import { diagramExtension, narrowSource, renderDiagrams } from './render-diagram
 import { verifyBuild } from './verify-build.mjs';
 
 const path = (relative) => fileURLToPath(new URL(relative, import.meta.url));
+// 标题中的行内公式转可读纯文本（站点标题按纯文本渲染，不允许裸 $ 或反斜杠）
+const texPlain = (tex) => tex
+  .replace(/\\sqrt\{([^{}]*)\}/g, '√$1')
+  .replace(/\\(?:mathrm|mathbf|text|operatorname)\{([^{}]*)\}/g, '$1')
+  .replace(/\\top/g, 'ᵀ').replace(/\\odot/g, '⊙').replace(/\\times/g, '×')
+  .replace(/\\infty/g, '∞').replace(/\\ll/g, '≪').replace(/\\gg/g, '≫')
+  .replace(/\\,/g, ' ').replace(/\\[a-zA-Z]+/g, '')
+  .replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
 const statIfPresent = (file) => lstat(file).catch((error) => {
   if (error.code !== 'ENOENT') throw error;
 });
@@ -32,7 +40,8 @@ for (const line of source.slice(volume.index).split(/\r?\n/).slice(1)) {
     section = undefined;
     ancestors = [];
   } else if (heading && current) {
-    const title = heading[2].replace(/<a id="[^"]+"><\/a>/g, '').replace(/`/g, '').trim();
+    const title = heading[2].replace(/<a id="[^"]+"><\/a>/g, '').replace(/`/g, '')
+      .replace(/\$([^$\r\n]+)\$/g, (_, tex) => texPlain(tex)).trim();
     const number = title.match(/^\d+(?:\.\d+)*/)?.[0];
     const level = heading[1].length;
     while (ancestors.at(-1)?.level >= level) ancestors.pop();
@@ -194,6 +203,20 @@ function render(lines) {
         '</figcaption><iframe src="' + escape(src) + '" title="' + escape(label) + '"></iframe></figure>');
       continue;
     }
+    // 段内交互附件链接：直接嵌入 iframe，剩余文字作为说明段落（Pages 不再以链接妥协）
+    if (kind === 'paragraph' && /\[([^\]]+)\]\(((?:\.\/)?resources\/[^\s)]+\.html)\)/i.test(line)) {
+      const embeds = [];
+      const rest = line.replace(/\[([^\]]+)\]\(((?:\.\/)?resources\/[^\s)]+\.html)\)/gi, (m, label, href) => {
+        const src = registerResource(href, 'text/html');
+        embeds.push('<figure class="resource-embed"><figcaption>' + escape(label) +
+          '</figcaption><iframe src="' + escape(src) + '" title="' + escape(label) + '"></iframe></figure>');
+        return '';
+      });
+      output.push(embeds.join(''));
+      const text = rest.replace(/^[\s🧪📈\-—–·:：]+/, '').trim();
+      if (text) output.push('<p>' + inline(text) + '</p>');
+      continue;
+    }
     if (kind === 'rule') continue;
     if (kind === 'ul' || kind === 'ol') {
       const result = list(lines, index - 1);
@@ -298,16 +321,12 @@ const book = pages.map(({ title, sections, lines }) => {
     searchText: body.join(' ').replace(/\s+/g, ' ').trim(),
     html: render(body),
   }));
-  const sizes = new Map(chapters.map((entry) => [entry.id, entry.searchText.length]));
-  for (const entry of chapters.toReversed()) {
-    if (entry.parentId) sizes.set(entry.parentId, sizes.get(entry.parentId) + sizes.get(entry.id));
-  }
   return {
     title,
     sections: chapters.map((entry) => ({
       ...entry,
-      // Keep short topics together. Give the children of long topics their own reading pages.
-      isPage: entry.level === 3 || (entry.level === 4 && sizes.get(entry.parentId) > 6000),
+      // 二层节点点击后连续展开三层内容：子节一律内联渲染，不再拆独立阅读页
+      isPage: entry.level === 3,
     })),
     html: render(lines),
   };

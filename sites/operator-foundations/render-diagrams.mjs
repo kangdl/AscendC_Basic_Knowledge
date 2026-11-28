@@ -56,7 +56,10 @@ export async function renderDiagrams(diagrams, stylesheet) {
             files.set(file, await page.locator('body > svg').screenshot({ omitBackground: true }));
             await page.locator('body > svg').evaluate((element) => element.remove());
           } else {
-            files.set(file, svg + '\n');
+            // 显式 width/height：避免 <img> 将窄高 SVG 拉伸到栏宽导致高度按比例放大
+            const viewBox = svg.match(/viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"/);
+            const sized = viewBox ? svg.replace('width="100%"', 'width="' + viewBox[1] + '" height="' + viewBox[2] + '"') : svg;
+            files.set(file, sized + '\n');
           }
         }
       } catch (error) {

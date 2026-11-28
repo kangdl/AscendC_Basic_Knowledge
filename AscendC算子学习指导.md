@@ -1157,33 +1157,36 @@ Step 2: 读 S    → 算 P = softmax(S) → 把 P 写回显存  (N×N)
 Step 3: 读 P, V → 算 O = PV → 把 O 写回显存          (N×d)
 ```
 
-问题在 $S$ 和 $P$ 都是 $N \times N$。 $N = 4096$、fp16 时单个矩阵就是 $4096^2 \times 2\text{B} \approx 32\text{MB}$，两个合计 64MB——远超 GPU 片上缓存，必须在显存（HBM）里反复读写。总访存量 $\Theta(Nd + N^2)$，当 $N \gg d$ 时 $N^2$ 项主导。
+问题在 $S$ 和 $P$ 都是 $N \times N$。 $N = 4096$、fp16 时单个矩阵就是 $4096^2 \times 2\text{B} \approx 32\text{MB}$，两个合计 64MB——远超片上 Buffer（昇腾 UB/L1，GPU SMEM），必须在显存（HBM）里反复读写。总访存量 $\Theta(Nd + N^2)$，当 $N \gg d$ 时 $N^2$ 项主导。
 
-**注意力从"计算瓶颈"变成了"访存瓶颈"**：GPU 的算力大部分时间在等数据搬运。FlashAttention（Dao et al., 2022）的洞察是：**用分块 + Online Softmax，完全不物化 $N \times N$ 矩阵**，内存从 $O(N^2)$ 降到 $O(N)$，同时大幅减少 HBM 访问。
+**注意力从"计算瓶颈"变成了"访存瓶颈"**：计算单元（昇腾 Cube/Vector 核）大部分时间在等数据搬运。FlashAttention（Dao et al., 2022）的洞察是：**用分块 + Online Softmax，完全不物化 $N \times N$ 矩阵**，内存从 $O(N^2)$ 降到 $O(N)$，同时大幅减少 HBM 访问。
 
-#### 2.5.2 GPU 内存层次：SRAM vs HBM
+#### 2.5.2 内存层次：片上 Buffer vs HBM
 
-| 存储层级 | 类型 | A100 容量 | 带宽 | 特点 |
+FlashAttention 的账要算在具体的存储层级上。昇腾 AI Core 的"案板"是 Vector 核的 UB 与 Cube 核的 L1/L0C，"仓库"是 HBM（第七章 7.2 有完整金字塔）：
+
+| 存储层级 | 角色 | A2·910B2 | A5·950DT | GPU 对照·A100 |
 |---|---|---|---|---|
-| SRAM（片上） | 寄存器 + 共享内存 | 每 SM 192 KB，全片约 20 MB | ~19 TB/s | 极快，极小 |
-| HBM（显存） | 高带宽内存 | 40–80 GB | ~1.5–2.0 TB/s | 大，但带宽差一个量级 |
+| 片上工作区 | 当前 tile 的容身之处 | UB 192 KB / Vector 核 | UB 256 KB / Vector 核（可用 248 KB） | SMEM 每 SM 约 164 KB 可用 |
+| 矩阵专用缓存 | 操作数暂存 / 累加器 | L1 512 KB + L0C 128 KB | L1 512 KB + L0C 256 KB | 寄存器堆（累加器） |
+| HBM（显存） | 仓库 | 64 GB @ 1.6 TB/s | 144 GB @ 4 TB/s | 40–80 GB @ ~2 TB/s |
 
-*表2.5.2-1 GPU 两级存储：SRAM 带宽约为 HBM 的 10 倍，容量只有约 1/2000*
+*表2.5.2-1 片上 Buffer 与 HBM：容量差约百倍、带宽差一个量级——N×N 中间矩阵装不进案板，只能住仓库*
 
 ```mermaid
 flowchart LR
-    C["计算单元<br/>Tensor Core / CUDA Core"] <-->|"极快"| S["SRAM 片上<br/>当前 tile：Q_i, K_j, V_j, S_ij"]
-    S <-->|"带宽差 ≈10×<br/>瓶颈在这里"| H["HBM 显存<br/>Q, K, V, O（O(Nd)）"]
+    C["计算单元<br/>Cube 核 / Vector 核"] <-->|"极快"| S["片上 Buffer<br/>UB / L1 / L0C<br/>当前 tile：Q_i, K_j, V_j, S_ij"]
+    S <-->|"带宽差一个量级<br/>瓶颈在这里"| H["HBM 显存<br/>Q, K, V, O（O(Nd)）"]
     H -.->|"标准实现：N×N 的 S、P<br/>反复读写"| S
 ```
 
-*图2.5.2-1 GPU 内存层次与注意力的访存模式*
+*图2.5.2-1 昇腾内存层次与注意力的访存模式（GPU 同构：SMEM ↔ HBM）*
 
-标准实现需要 **6 次 HBM 传输**（读 QK → 写 S → 读 S → 写 P → 读 PV → 写 O）；FlashAttention 把中间步骤全部关在 SRAM 里完成，只需 **2 次**（分块读 QKV → 写最终 O）。
+标准实现需要 **6 次 HBM 传输**（读 QK → 写 S → 读 S → 写 P → 读 PV → 写 O）；FlashAttention 把中间步骤全部关在片上 Buffer 里完成，只需 **2 次**（分块读 QKV → 写最终 O）。
 
 #### 2.5.3 分块（Tiling）：把 N×N 切成用完即丢的小块
 
-把 Q 按行切成 $T_r$ 块（每块 $B_r$ 行），K/V 按行切成 $T_c$ 块（每块 $B_c$ 行）。块大小的约束是"SRAM 同时装得下 Q 块、K 块、V 块和局部分数块"：
+把 Q 按行切成 $T_r$ 块（每块 $B_r$ 行），K/V 按行切成 $T_c$ 块（每块 $B_c$ 行）。块大小的约束是"片上工作区（昇腾为 UB）同时装得下 Q 块、K 块、V 块和局部分数块"：
 
 $$
 \underbrace{B_r d}_{Q_i} + \underbrace{B_c d}_{K_j} + \underbrace{B_c d}_{V_j} + \underbrace{B_r B_c}_{S_{ij}} \le M \;\;\overset{B_r = B_c = B}{\Longrightarrow}\;\; B \approx \frac{M}{4d}
@@ -1199,18 +1202,20 @@ $$
 | K/V 块数 $T_c$ | $\lceil 512/400 \rceil$ | 2 |
 | 块计算总数 | $T_r \times T_c$ | 16 |
 
-*表2.5.3-1 分块大小计算例：SRAM 越大 → 块越大 → 循环次数越少 → HBM 访问越少*
+*表2.5.3-1 分块大小计算例：片上工作区越大 → 块越大 → 循环次数越少 → HBM 访问越少*
 
-$S$ 的块矩阵布局只是**逻辑视图**：SRAM 中同时只存在一个 $B_r \times B_c$ 的 $S_{ij}$，算完立刻丢弃，完整 $N \times N$ 从未落地。
+这是论文口径（ $M = 100\text{KB}$ ）。换成 A5 的 UB（可用 248 KB）、 $d = 64$ ： $B \approx 248 \times 1024 / (4 \times 64) \approx 992$ ，工程上取 512/1024 这类对齐值——**片上工作区越大，块越大、HBM 访问越少**，这正是 A5 把 UB 从 192 KB 扩到 256 KB 的用意之一。
+
+$S$ 的块矩阵布局只是**逻辑视图**：片上工作区中同时只存在一个 $B_r \times B_c$ 的 $S_{ij}$，算完立刻丢弃，完整 $N \times N$ 从未落地。
 
 v1 的循环结构（外层 K/V、内层 Q）：
 
 ```text
 外层 j = 1 … T_c:          遍历 K/V 块
-  加载 K_j, V_j 到 SRAM
+  加载 K_j, V_j 到 UB
   内层 i = 1 … T_r:        遍历 Q 块
     加载 Q_i 及累积量 O_i, ℓ_i, m_i
-    SRAM 内算 S_ij → 局部 softmax → 更新 O_i, ℓ_i, m_i
+    UB 内算 S_ij → 局部 softmax → 更新 O_i, ℓ_i, m_i
     写回 HBM
 ```
 
@@ -1285,7 +1290,7 @@ $$
 
 **内存**：标准实现 $\Theta(Nd + N^2)$；FlashAttention 只存 $Q,K,V,O$ 加每行两个标量 $(m, \ell)$，共 $\Theta(Nd)$——**没有任何 $N^2$ 项**。
 
-**IO（HBM 访问量）**：标准 $\Theta(Nd + N^2)$；FlashAttention 为 $\Theta(N^2 d^2 / M)$（ $M$ 为 SRAM 大小）。直觉：外层 $N/B_c$ 个 KV 块，内层每次读写 $\Theta(B_r d)$ 的 Q 块状态，总量 $\frac{N^2 d}{B_c} = \Theta(\frac{N^2 d^2}{M})$。典型参数下 $d^2 \ll M$，故远小于 $N^2$。论文还证明这是**渐近最优**的：不存在精确注意力算法能在所有 $M$ 下达到 $o(N^2 d^2/M)$ 的 IO。
+**IO（HBM 访问量）**：标准 $\Theta(Nd + N^2)$；FlashAttention 为 $\Theta(N^2 d^2 / M)$（ $M$ 为片上工作区大小）。直觉：外层 $N/B_c$ 个 KV 块，内层每次读写 $\Theta(B_r d)$ 的 Q 块状态，总量 $\frac{N^2 d}{B_c} = \Theta(\frac{N^2 d^2}{M})$。典型参数下 $d^2 \ll M$，故远小于 $N^2$。论文还证明这是**渐近最优**的：不存在精确注意力算法能在所有 $M$ 下达到 $o(N^2 d^2/M)$ 的 IO。
 
 **FLOPs 不变**（仍是 $O(N^2 d)$）——FlashAttention 省的是搬运，不是计算。实测比标准实现快 2–4 倍。
 
@@ -1298,7 +1303,7 @@ $$
 | 线程块间同步 | 多线程块写同一 Q 输出，需同步 | 每线程块独占一个 Q 输出，无同步 |
 | 并行维度 | 头 × batch | 额外在 Q 块维并行 |
 | 非 matmul FLOPs | 较多 | 减少，更好喂饱 Tensor Core |
-| A100 利用率 | 理论峰值 25–40% | 50–73%（约 2× 加速） |
+| 论文实测利用率（A100） | 理论峰值 25–40% | 50–73%（约 2× 加速） |
 
 *表2.5.6-1 FlashAttention v1 vs v2：核心是循环交换带来的并行度提升*
 
@@ -2076,7 +2081,7 @@ flowchart TB
 - Su et al., *RoFormer* (2021), arXiv:2104.09864（RoPE）
 - Kwon et al., *Efficient Memory Management for LLM Serving with PagedAttention* (2023), arXiv:2309.06180
 
-下一章进入 Triton 算子开发：本章的 FlashAttention 分块、Online Softmax、KV cache 排布，将在那里变成可以亲手写出来、在 GPU 上跑起来的 kernel。
+下一章进入 Triton 算子开发：本章的 FlashAttention 分块、Online Softmax、KV cache 排布，将在那里变成可以亲手写出来、在设备上跑起来的 kernel。
 
 ## 第三章 Triton算子
 

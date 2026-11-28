@@ -3,6 +3,7 @@ import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeF
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import katex from 'katex';
+import { createHighlighter } from 'shiki';
 import { resourceType } from './resource-path.mjs';
 import { diagramExtension, narrowSource, renderDiagrams } from './render-diagrams.mjs';
 import { verifyBuild } from './verify-build.mjs';
@@ -65,6 +66,21 @@ if (fenced || pages.length !== 9 || headings.some(({ id }) => id === 's-undefine
 
 const escape = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+
+// 代码块语法高亮：构建期生成带色 span（离线可用，不引入客户端 JS）
+const highlighter = await createHighlighter({ themes: ['github-light'], langs: ['python', 'cpp', 'bash'] });
+const codeLang = { python: 'python', py: 'python', cpp: 'cpp', 'c++': 'cpp', bash: 'bash', sh: 'bash', shell: 'bash' };
+function highlightCode(source, language) {
+  const lang = codeLang[language.toLowerCase()];
+  if (!lang) return escape(source);   // text/未知语言：原样等宽输出
+  const { tokens } = highlighter.codeToTokens(source, { lang, theme: 'github-light' });
+  return tokens.map((line) => line.map((token) => {
+    const styles = ['color:' + token.color];
+    if (token.fontStyle & 1) styles.push('font-style:italic');
+    if (token.fontStyle & 2) styles.push('font-weight:600');
+    return '<span style="' + styles.join(';') + '">' + escape(token.content) + '</span>';
+  }).join('')).join('\n');
+}
 const resources = new Set();
 const diagrams = new Map();
 const resourceLine = /^\s*\[([^\]]+)\]\(((?:\.\/)?resources\/[^\s)]+\.html)\)\s*$/i;
@@ -184,7 +200,7 @@ function render(lines) {
           ' alt="' + escape(caption ?? 'Mermaid 图') + '"></picture>' +
           (caption ? '<figcaption>' + inline(caption) + '</figcaption>' : '') + '</figure>');
       } else {
-        output.push('<div class="code-block"><div class="code-toolbar"><span>' + escape(language || '示例') + '</span><button type="button" class="text-button" data-copy>复制</button></div><pre tabindex="0"><code>' + escape(code.join('\n')) + '</code></pre></div>');
+        output.push('<div class="code-block"><div class="code-toolbar"><span>' + escape(language || '示例') + '</span><button type="button" class="text-button" data-copy>复制</button></div><pre tabindex="0"><code>' + highlightCode(code.join('\n'), language) + '</code></pre></div>');
       }
       continue;
     }
